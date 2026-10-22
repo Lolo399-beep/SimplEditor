@@ -106,3 +106,93 @@ h1 {
     background-color: #ffffff;
     color: #000000;
 }
+/* --- Estilos para la sección de filas dentro del proyecto --- */
+.project-workspace {
+    display: flex;
+    align-items: flex-start;
+    gap: 40px;
+    margin-top: 20px;
+}
+
+.add-row-btn {
+    background-color: transparent;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 10px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.add-row-btn:hover {
+    background-color: #ffffff;
+    color: #000000;
+}
+
+.rows-container {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+.row-item {
+    height: 40px;
+    border: 1px solid #ffffff;
+    background-color: #000000;
+    position: relative;
+    cursor: grab;
+    user-select: none;
+    display: flex;
+    align-items: center;
+}
+
+.row-item:active {
+    cursor: grabbing;
+}
+
+.row-item.dragging {
+    opacity: 0.4;
+    border: 1px dashed #ffffff;
+}
+
+/* Manillas en los bordes izquierdo y derecho para redimensionar todas a la vez */
+.row-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    z-index: 10;
+}
+
+.row-handle.left {
+    left: -4px;
+}
+
+.row-handle.right {
+    right: -4px;
+}
+
+/* Menú contextual de borrado */
+.context-menu {
+    position: absolute;
+    background-color: #111111;
+    border: 1px solid #333333;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    z-index: 1000;
+    display: none;
+    padding: 4px 0;
+}
+
+.context-menu-item {
+    padding: 8px 16px;
+    color: #ff4d4d;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.context-menu-item:hover {
+    background-color: #222222;
+}
