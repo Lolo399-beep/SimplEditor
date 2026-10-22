@@ -44,15 +44,21 @@
         </div>
 
         <!-- Controles y contenedor de filas -->
-        <div class="project-workspace">
-            <button id="addRowBtn" class="add-row-btn">+ Nueva fila</button>
-            
+    <div class="project-workspace">
+        <button id="addRowBtn" class="add-row-btn">+ Nueva fila</button>
+        
+        <div class="workspace-content">
             <div id="rowsContainer" class="rows-container" style="width: 500px;">
                 <!-- Las filas se agregarán aquí dinámicamente -->
             </div>
+
+            <!-- Botones de Importar / Exportar -->
+            <div class="data-transfer-controls">
+                <button id="importBtn" class="action-btn">Importar</button>
+                <button id="exportBtn" class="action-btn">Exportar</button>
+            </div>
         </div>
     </div>
-
     <script src="main.js"></script>
 </body>
 </html>

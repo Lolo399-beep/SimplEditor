@@ -271,3 +271,32 @@ h1 {
     background-color: #ff4d4d;
     color: #ffffff;
 }
+/* Wrapper para agrupar el contenedor de filas y los botones inferiores */
+.workspace-content {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+/* Botones genéricos con borde blanco estilo minimalista */
+.action-btn {
+    background-color: transparent;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 10px 24px;
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.action-btn:hover {
+    background-color: #ffffff;
+    color: #000000;
+}
+
+/* Contenedor de botones Importar / Exportar */
+.data-transfer-controls {
+    display: flex;
+    gap: 20px;
+}
