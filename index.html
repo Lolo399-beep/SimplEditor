@@ -36,29 +36,60 @@
             </div>
         </header>
 
-        <!-- Botones de Control de Reproducción -->
-        <div class="media-controls">
-            <button class="media-btn" title="Play">▶</button>
-            <button class="media-btn" title="Stop / Pause">❚❚</button>
-            <button class="media-btn" title="Replay">↻</button>
+        <!-- SECCIÓN SUPERIOR: Controles de reproducción y Reproductor -->
+        <div class="top-editor-section">
+            <div class="media-controls">
+                <button id="playBtn" class="media-btn" title="Play">▶</button>
+                <button id="pauseBtn" class="media-btn" title="Pause">❚❚</button>
+                <button id="replayBtn" class="media-btn" title="Replay">↻</button>
+            </div>
+
+            <!-- REPRODUCTOR DE VIDEO / CUADRADO BLANCO -->
+            <div class="video-player-container" id="videoPlayerContainer">
+                <video id="videoPreview" preload="metadata">
+                    <!-- Aquí se cargará la fuente del video del proyecto -->
+                    <source src="" type="video/mp4">
+                    Tu navegador no soporta reproducción de video HTML5.
+                </video>
+
+                <!-- Overlay de controles inferiores del video -->
+                <div class="video-controls-overlay">
+                    <div class="volume-control-wrapper">
+                        <button id="volumeBtn" class="video-btn" title="Volumen">
+                            <svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+                            </svg>
+                        </button>
+                        <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.05" value="1" title="Ajustar volumen">
+                    </div>
+
+                    <button id="fullscreenBtn" class="video-btn" title="Pantalla Completa">
+                        <svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- Controles y contenedor de filas -->
-    <div class="project-workspace">
-        <button id="addRowBtn" class="add-row-btn">+ Nueva fila</button>
-        
-        <div class="workspace-content">
-            <div id="rowsContainer" class="rows-container" style="width: 500px;">
-                <!-- Las filas se agregarán aquí dinámicamente -->
-            </div>
+        <div class="project-workspace">
+            <button id="addRowBtn" class="add-row-btn">+ Nueva fila</button>
+            
+            <div class="workspace-content">
+                <div id="rowsContainer" class="rows-container" style="width: 500px;">
+                    <!-- Las filas se agregarán aquí dinámicamente -->
+                </div>
 
-            <!-- Botones de Importar / Exportar -->
-            <div class="data-transfer-controls">
-                <button id="importBtn" class="action-btn">Importar</button>
-                <button id="exportBtn" class="action-btn">Exportar</button>
+                <!-- Botones de Importar / Exportar -->
+                <div class="data-transfer-controls">
+                    <button id="importBtn" class="action-btn">Importar</button>
+                    <button id="exportBtn" class="action-btn">Exportar</button>
+                </div>
             </div>
         </div>
     </div>
+
     <script src="main.js"></script>
 </body>
 </html>

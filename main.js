@@ -400,3 +400,66 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
         projectContextMenu.style.display = 'none';
     }
 });
+// --- Lógica del Reproductor de Video ---
+const videoPreview = document.getElementById('videoPreview');
+const videoPlayerContainer = document.getElementById('videoPlayerContainer');
+
+const playBtn = document.getElementById('playBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const replayBtn = document.getElementById('replayBtn');
+
+const volumeBtn = document.getElementById('volumeBtn');
+const volumeSlider = document.getElementById('volumeSlider');
+const fullscreenBtn = document.getElementById('fullscreenBtn');
+
+// Reproducir
+playBtn.addEventListener('click', () => {
+    if (videoPreview.src) {
+        videoPreview.play();
+    }
+});
+
+// Pausar
+pauseBtn.addEventListener('click', () => {
+    videoPreview.pause();
+});
+
+// Reiniciar (Replay)
+replayBtn.addEventListener('click', () => {
+    videoPreview.currentTime = 0;
+    videoPreview.play();
+});
+
+// Control de Volumen mediante Slider
+volumeSlider.addEventListener('input', (e) => {
+    const value = e.target.value;
+    videoPreview.volume = value;
+    videoPreview.muted = (value === '0');
+});
+
+// Botón Mute / Unmute al hacer click en el icono de sonido
+volumeBtn.addEventListener('click', () => {
+    videoPreview.muted = !videoPreview.muted;
+    if (videoPreview.muted) {
+        volumeSlider.value = 0;
+    } else {
+        volumeSlider.value = videoPreview.volume || 1;
+    }
+});
+
+// Control de Pantalla Completa (Fullscreen)
+fullscreenBtn.addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+        if (videoPlayerContainer.requestFullscreen) {
+            videoPlayerContainer.requestFullscreen();
+        } else if (videoPlayerContainer.webkitRequestFullscreen) { /* Safari */
+            videoPlayerContainer.webkitRequestFullscreen();
+        } else if (videoPlayerContainer.msRequestFullscreen) { /* IE11 */
+            videoPlayerContainer.msRequestFullscreen();
+        }
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        }
+    }
+});
