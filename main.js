@@ -9,15 +9,87 @@ const backBtn = document.getElementById('backBtn');
 const addRowBtn = document.getElementById('addRowBtn');
 const rowsContainer = document.getElementById('rowsContainer');
 
+const undoBtn = document.getElementById('undoBtn');
+const redoBtn = document.getElementById('redoBtn');
+
 // Estructura de almacenamiento en memoria
 let projects = {}; 
 let currentProjectId = null;
 let projectCount = 0;
 let draggedRow = null;
 
+// --- Sistema Undo / Redo ---
+let undoStack = [];
+let redoStack = [];
+
+function recordState() {
+    if (!currentProjectId || !projects[currentProjectId]) return;
+
+    // Captura el estado actual de las filas y del ancho
+    const state = {
+        rowsWidth: rowsContainer.style.width || '500px',
+        rows: Array.from(rowsContainer.children).map(row => ({
+            muted: row.classList.contains('muted'),
+            locked: row.classList.contains('locked')
+        }))
+    };
+
+    undoStack.push(JSON.stringify(state));
+    redoStack = []; // Limpiar rehacer cuando se realiza una nueva acción
+}
+
+function undo() {
+    if (undoStack.length <= 1) return; // Mantener al menos el estado inicial
+
+    const currentState = undoStack.pop();
+    redoStack.push(currentState);
+
+    const previousState = JSON.parse(undoStack[undoStack.length - 1]);
+    applyState(previousState);
+}
+
+function redo() {
+    if (redoStack.length === 0) return;
+
+    const nextState = redoStack.pop();
+    undoStack.push(nextState);
+
+    applyState(JSON.parse(nextState));
+}
+
+function applyState(state) {
+    rowsContainer.style.width = state.rowsWidth;
+    rowsContainer.innerHTML = '';
+
+    state.rows.forEach(rowData => {
+        const row = createRowElement(false);
+        if (rowData.muted) row.classList.add('muted');
+        if (rowData.locked) row.classList.add('locked');
+    });
+
+    saveCurrentProjectRows();
+}
+
+// Atajos de teclado (Ctrl + Z, Ctrl + Y, Ctrl + Shift + Z)
+document.addEventListener('keydown', (e) => {
+    if (!currentProjectId) return; // Solo actuar dentro de un proyecto
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+            redo();
+        } else {
+            undo();
+        }
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        redo();
+    }
+});
+
+undoBtn.addEventListener('click', undo);
+redoBtn.addEventListener('click', redo);
+
 // --- Funciones de Navegación ---
 function showMainView(pushToHistory = true) {
-    // Guardar filas del proyecto actual antes de salir
     saveCurrentProjectRows();
     
     currentProjectId = null;
@@ -35,23 +107,25 @@ function openProjectView(projectId, pushToHistory = true) {
 
     currentProjectTitle.textContent = project.name || 'Sin título';
     
-    // Cargar las filas exclusivas de este proyecto
+    // Reiniciar historial para el proyecto actual
+    undoStack = [];
+    redoStack = [];
+
     loadProjectRows(project);
+    recordState(); // Estado inicial
 
     mainView.classList.add('hidden');
     projectDetailView.classList.remove('hidden');
 
     if (pushToHistory) {
-        history.pushState({ view: 'project', id: projectId }, '', `#project-${projectId}`);
+        history.pushState({ view: 'project', id: projectId }, `#project-${projectId}`);
     }
 }
 
-// Botón Volver
 backBtn.addEventListener('click', () => {
     showMainView(true);
 });
 
-// Soporte para botones Atrás/Adelante del navegador
 window.addEventListener('popstate', (e) => {
     if (e.state && e.state.view === 'project') {
         openProjectView(e.state.id, false);
@@ -65,15 +139,13 @@ addBtn.addEventListener('click', () => {
     projectCount++;
     const id = `proj_${Date.now()}`;
 
-    // Crear el registro del proyecto en memoria
     projects[id] = {
         id: id,
         name: `Proyecto ${projectCount}`,
         rowsWidth: '500px',
-        rowsCount: 0
+        rowsData: []
     };
 
-    // Crear la tarjeta en la interfaz
     const card = document.createElement('div');
     card.className = 'project-card';
 
@@ -85,18 +157,21 @@ addBtn.addEventListener('click', () => {
     input.className = 'project-name';
     input.value = projects[id].name;
 
-    // Actualizar nombre en memoria al editar
     input.addEventListener('input', () => {
         projects[id].name = input.value;
     });
 
-    // Abrir proyecto
     box.addEventListener('click', () => {
         openProjectView(id, true);
     });
 
     input.addEventListener('click', (e) => {
         e.stopPropagation();
+    });
+
+    box.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showProjectContextMenu(e.clientX, e.clientY, id, card);
     });
 
     card.appendChild(box);
@@ -108,28 +183,32 @@ addBtn.addEventListener('click', () => {
 function saveCurrentProjectRows() {
     if (!currentProjectId || !projects[currentProjectId]) return;
     
-    projects[currentProjectId].rowsCount = rowsContainer.children.length;
     projects[currentProjectId].rowsWidth = rowsContainer.style.width || '500px';
+    projects[currentProjectId].rowsData = Array.from(rowsContainer.children).map(row => ({
+        muted: row.classList.contains('muted'),
+        locked: row.classList.contains('locked')
+    }));
 }
 
 function loadProjectRows(project) {
-    // Limpiar el contenedor de filas previo
     rowsContainer.innerHTML = '';
     rowsContainer.style.width = project.rowsWidth || '500px';
 
-    // Reconstruir la cantidad de filas guardadas para este proyecto
-    for (let i = 0; i < project.rowsCount; i++) {
-        createRowElement();
+    if (project.rowsData && project.rowsData.length > 0) {
+        project.rowsData.forEach(data => {
+            const row = createRowElement(false);
+            if (data.muted) row.classList.add('muted');
+            if (data.locked) row.classList.add('locked');
+        });
     }
 }
 
 addRowBtn.addEventListener('click', () => {
     if (!currentProjectId) return;
-    createRowElement();
-    saveCurrentProjectRows();
+    createRowElement(true);
 });
 
-function createRowElement() {
+function createRowElement(record = true) {
     const row = document.createElement('div');
     row.className = 'row-item';
     
@@ -154,6 +233,7 @@ function createRowElement() {
         row.classList.remove('dragging');
         draggedRow = null;
         saveCurrentProjectRows();
+        recordState();
     });
     
     row.addEventListener('dragover', (e) => {
@@ -177,9 +257,14 @@ function createRowElement() {
 
     setupResizeHandlers(handleLeft, handleRight);
     rowsContainer.appendChild(row);
+
+    saveCurrentProjectRows();
+    if (record) recordState();
+
+    return row;
 }
 
-// Redimensionamiento
+// Redimensionamiento (Estiramiento y Acortamiento)
 function setupResizeHandlers(leftHandle, rightHandle) {
     const initResize = (e, direction) => {
         e.preventDefault();
@@ -197,6 +282,7 @@ function setupResizeHandlers(leftHandle, rightHandle) {
 
         const onMouseUp = () => {
             saveCurrentProjectRows();
+            recordState(); // Registra el cambio de estiramiento/acortamiento en el historial
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
         };
@@ -209,16 +295,32 @@ function setupResizeHandlers(leftHandle, rightHandle) {
     rightHandle.addEventListener('mousedown', (e) => initResize(e, 'right'));
 }
 
-// Menú contextual flotante para eliminar filas
+// Menú contextual flotante para Filas
+// --- Menú contextual flotante para Filas ---
 const contextMenu = document.createElement('div');
 contextMenu.className = 'context-menu';
-contextMenu.innerHTML = `<div class="context-menu-item" id="deleteRowOption">Borrar</div>`;
+contextMenu.innerHTML = `
+    <div class="context-menu-item" id="muteRowOption">Silenciar</div>
+    <div class="context-menu-item" id="unmuteRowOption">Sonorizar</div>
+    <div class="context-menu-item" id="lockRowOption">Bloquear</div>
+    <div class="context-menu-item danger" id="deleteRowOption">Borrar</div>
+`;
 document.body.appendChild(contextMenu);
 
-let rowToDelete = null;
+let rowTarget = null;
 
 function showContextMenu(x, y, row) {
-    rowToDelete = row;
+    rowTarget = row;
+    projectContextMenu.style.display = 'none';
+
+    // Cambiar dinámicamente el texto y acción de Bloquear/Desbloquear según el estado
+    const lockOption = document.getElementById('lockRowOption');
+    if (row.classList.contains('locked')) {
+        lockOption.textContent = 'Desbloquear';
+    } else {
+        lockOption.textContent = 'Bloquear';
+    }
+
     contextMenu.style.left = `${x}px`;
     contextMenu.style.top = `${y}px`;
     contextMenu.style.display = 'block';
@@ -228,10 +330,73 @@ document.addEventListener('click', () => {
     contextMenu.style.display = 'none';
 });
 
-document.getElementById('deleteRowOption').addEventListener('click', () => {
-    if (rowToDelete) {
-        rowToDelete.remove();
-        rowToDelete = null;
+// Opciones del Menú Contextual de Filas
+document.getElementById('muteRowOption').addEventListener('click', () => {
+    if (rowTarget) {
+        rowTarget.classList.add('muted');
         saveCurrentProjectRows();
+        recordState();
+    }
+});
+
+document.getElementById('unmuteRowOption').addEventListener('click', () => {
+    if (rowTarget) {
+        rowTarget.classList.remove('muted');
+        saveCurrentProjectRows();
+        recordState();
+    }
+});
+
+document.getElementById('lockRowOption').addEventListener('click', () => {
+    if (rowTarget) {
+        // Alterna el estado de bloqueo
+        rowTarget.classList.toggle('locked');
+        saveCurrentProjectRows();
+        recordState();
+    }
+});
+
+document.getElementById('deleteRowOption').addEventListener('click', () => {
+    if (rowTarget) {
+        rowTarget.remove();
+        rowTarget = null;
+        saveCurrentProjectRows();
+        recordState(); // Permite recuperar la fila eliminada con Ctrl+Z
+    }
+});
+
+// --- Menú contextual flotante para Proyectos ---
+const projectContextMenu = document.createElement('div');
+projectContextMenu.className = 'context-menu';
+projectContextMenu.innerHTML = `<div class="context-menu-item danger" id="deleteProjectOption">Borrar proyecto</div>`;
+document.body.appendChild(projectContextMenu);
+
+let projectToDeleteId = null;
+let cardToDelete = null;
+
+function showProjectContextMenu(x, y, projectId, cardElement) {
+    projectToDeleteId = projectId;
+    cardToDelete = cardElement;
+    
+    contextMenu.style.display = 'none';
+
+    projectContextMenu.style.left = `${x}px`;
+    projectContextMenu.style.top = `${y}px`;
+    projectContextMenu.style.display = 'block';
+}
+
+document.addEventListener('click', (e) => {
+    if (!projectContextMenu.contains(e.target)) {
+        projectContextMenu.style.display = 'none';
+    }
+});
+
+document.getElementById('deleteProjectOption').addEventListener('click', () => {
+    if (projectToDeleteId && cardToDelete) {
+        delete projects[projectToDeleteId];
+        cardToDelete.remove();
+        projectToDeleteId = null;
+        cardToDelete = null;
+        projectContextMenu.style.display = 'none';
     }
 });

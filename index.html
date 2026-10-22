@@ -24,21 +24,34 @@
     </div>
 
     <!-- VISTA EXCLUSIVA DEL PROYECTO -->
-<div id="projectDetailView" class="hidden">
-    <header class="project-header">
-        <button id="backBtn" class="back-btn">← Volver</button>
-        <h2 id="currentProjectTitle">Nombre del Proyecto</h2>
-    </header>
+    <div id="projectDetailView" class="hidden">
+        <header class="project-header">
+            <button id="backBtn" class="back-btn">&lt;- Volver</button>
+            <h2 id="currentProjectTitle">Nombre del Proyecto</h2>
+            
+            <!-- Botones Deshacer y Rehacer -->
+            <div class="history-controls">
+                <button id="undoBtn" class="icon-btn" title="Deshacer (Ctrl + Z)">↶</button>
+                <button id="redoBtn" class="icon-btn" title="Rehacer (Ctrl + Y / Ctrl + Shift + Z)">↷</button>
+            </div>
+        </header>
 
-    <!-- Controles y contenedor de filas -->
-    <div class="project-workspace">
-        <button id="addRowBtn" class="add-row-btn">+ Nueva fila</button>
-        
-        <div id="rowsContainer" class="rows-container" style="width: 500px;">
-            <!-- Las filas se agregarán aquí dinámicamente -->
+        <!-- Botones de Control de Reproducción -->
+        <div class="media-controls">
+            <button class="media-btn" title="Play">▶</button>
+            <button class="media-btn" title="Stop / Pause">❚❚</button>
+            <button class="media-btn" title="Replay">↻</button>
+        </div>
+
+        <!-- Controles y contenedor de filas -->
+        <div class="project-workspace">
+            <button id="addRowBtn" class="add-row-btn">+ Nueva fila</button>
+            
+            <div id="rowsContainer" class="rows-container" style="width: 500px;">
+                <!-- Las filas se agregarán aquí dinámicamente -->
+            </div>
         </div>
     </div>
-</div>
 
     <script src="main.js"></script>
 </body>
