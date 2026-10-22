@@ -8,16 +8,28 @@
 </head>
 <body>
 
-    <h1>Proyectos</h1>
+    <!-- VISTA PRINCIPAL (Menú de Proyectos) -->
+    <div id="mainView">
+        <h1>Proyectos</h1>
 
-    <div class="grid" id="projectGrid">
-        <!-- Tarjeta para crear nuevo proyecto -->
-        <div class="project-card">
-            <div class="project-box" id="addProjectBtn" title="Crear nuevo proyecto">
-                <span class="plus-sign">+</span>
+        <div class="grid" id="projectGrid">
+            <!-- Tarjeta para crear nuevo proyecto -->
+            <div class="project-card">
+                <div class="project-box" id="addProjectBtn" title="Crear nuevo proyecto">
+                    <span class="plus-sign">+</span>
+                </div>
+                <input type="text" class="project-name" value="Nuevo proyecto" readonly />
             </div>
-            <input type="text" class="project-name" value="Nuevo proyecto" readonly />
         </div>
+    </div>
+
+    <!-- VISTA EXCLUSIVA DEL PROYECTO -->
+    <div id="projectDetailView" class="hidden">
+        <header class="project-header">
+            <button id="backBtn" class="back-btn">← Volver</button>
+            <h2 id="currentProjectTitle">Nombre del Proyecto</h2>
+        </header>
+        <!-- Aquí puedes agregar más contenido futuro de tu editor -->
     </div>
 
     <script src="main.js"></script>

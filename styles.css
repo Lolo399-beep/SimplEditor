@@ -72,3 +72,37 @@ h1 {
 .project-name:focus {
     border-bottom: 1px solid #ffffff;
 }
+/* Utilidad para ocultar elementos */
+.hidden {
+    display: none !important;
+}
+
+/* Header del menú exclusivo del proyecto */
+.project-header {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.project-header h2 {
+    font-size: 1.8rem;
+    font-weight: 400;
+}
+
+/* Botón Volver */
+.back-btn {
+    background-color: transparent;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.back-btn:hover {
+    background-color: #ffffff;
+    color: #000000;
+}
