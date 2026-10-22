@@ -133,12 +133,21 @@ h1 {
     background-color: #333333;
 }
 
+/* --- Sección Superior (Vista previa + Controles) --- */
+.top-editor-section {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-bottom: 25px;
+}
+
 /* Botones de Reproducción */
 .media-controls {
     display: flex;
+    align-items: center;
     gap: 12px;
-    margin-bottom: 20px;
-    margin-left: 120px; /* Alineación aproximada según mockup */
+    margin-bottom: 0;
+    margin-left: 120px;
 }
 
 .media-btn {
@@ -159,163 +168,14 @@ h1 {
     color: #000000;
 }
 
-/* --- Estilos para la sección de filas dentro del proyecto --- */
-.project-workspace {
-    display: flex;
-    align-items: flex-start;
-    gap: 40px;
-    margin-top: 10px;
-}
-
-.add-row-btn {
-    background-color: transparent;
-    color: #ffffff;
-    border: 1px solid #ffffff;
-    padding: 10px 16px;
-    border-radius: 0;
-    cursor: pointer;
-    font-size: 0.95rem;
-    transition: background-color 0.2s, color 0.2s;
-}
-
-.add-row-btn:hover {
-    background-color: #ffffff;
-    color: #000000;
-}
-
-.rows-container {
-    display: flex;
-    flex-direction: column;
-    position: relative;
-}
-
-.row-item {
-    height: 40px;
-    border: 1px solid #ffffff;
-    background-color: #000000;
-    position: relative;
-    cursor: grab;
-    user-select: none;
-    display: flex;
-    align-items: center;
-    margin-bottom: -1px; /* Para simular bordes compartidos como en la imagen */
-}
-
-.row-item:active {
-    cursor: grabbing;
-}
-
-.row-item.dragging {
-    opacity: 0.4;
-    border: 1px dashed #ffffff;
-}
-
-/* Estado bloqueado / silenciado visual */
-.row-item.locked {
-    opacity: 0.6;
-    pointer-events: auto; /* Permite hacer clic derecho para poder desbloquear */
-}
-
-.row-item.muted {
-    border-style: dashed;
-}
-
-/* Manillas en los bordes para redimensionar */
-.row-handle {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 8px;
-    cursor: ew-resize;
-    z-index: 10;
-}
-
-.row-handle.left {
-    left: -4px;
-}
-
-.row-handle.right {
-    right: -4px;
-}
-
-/* Menú contextual flotante */
-.context-menu {
-    position: absolute;
-    background-color: #000000;
-    border: 1px solid #ffffff;
-    border-radius: 0;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.8);
-    z-index: 1000;
-    display: none;
-    padding: 4px 0;
-    min-width: 130px;
-}
-
-.context-menu-item {
-    padding: 8px 16px;
-    color: #ffffff; /* Texto blanco para las acciones principales */
-    cursor: pointer;
+.time-display {
+    margin-left: 8px;
+    color: #a0a0a0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.9rem;
 }
 
-.context-menu-item:hover {
-    background-color: #ffffff;
-    color: #000000;
-}
-
-.context-menu-item.danger {
-    color: #ff4d4d;
-}
-
-.context-menu-item.danger:hover {
-    background-color: #ff4d4d;
-    color: #ffffff;
-}
-/* Wrapper para agrupar el contenedor de filas y los botones inferiores */
-.workspace-content {
-    display: flex;
-    flex-direction: column;
-    gap: 15px;
-}
-
-/* Botones genéricos con borde blanco estilo minimalista */
-.action-btn {
-    background-color: transparent;
-    color: #ffffff;
-    border: 1px solid #ffffff;
-    padding: 10px 24px;
-    border-radius: 0;
-    cursor: pointer;
-    font-size: 0.95rem;
-    transition: background-color 0.2s, color 0.2s;
-}
-
-.action-btn:hover {
-    background-color: #ffffff;
-    color: #000000;
-}
-
-/* Contenedor de botones Importar / Exportar */
-.data-transfer-controls {
-    display: flex;
-    gap: 20px;
-}
-/* --- Sección Superior (Video Player + Controles) --- */
-.top-editor-section {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    margin-bottom: 25px;
-}
-
-.media-controls {
-    display: flex;
-    gap: 12px;
-    margin-bottom: 0;
-    margin-left: 120px; /* Alineado según layout */
-}
-
-/* --- Contenedor del Reproductor de Video (Cuadrado Blanco) --- */
+/* --- Contenedor de la vista previa --- */
 .video-player-container {
     position: relative;
     width: 320px;
@@ -328,7 +188,7 @@ h1 {
     overflow: hidden;
 }
 
-.video-player-container video {
+.video-player-container canvas {
     width: 100%;
     height: 100%;
     object-fit: contain;
@@ -412,7 +272,293 @@ h1 {
     border: none;
 }
 
-.video-player-container:fullscreen video {
+.video-player-container:fullscreen canvas {
     width: 100%;
     height: 100%;
+}
+
+/* --- Sección de la línea de tiempo --- */
+.project-workspace {
+    display: flex;
+    align-items: flex-start;
+    gap: 40px;
+    margin-top: 10px;
+}
+
+.add-row-btn {
+    background-color: transparent;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 10px 16px;
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.add-row-btn:hover {
+    background-color: #ffffff;
+    color: #000000;
+}
+
+/* Wrapper para agrupar la línea de tiempo y los botones inferiores */
+.workspace-content {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.timeline {
+    position: relative;
+    width: fit-content;
+}
+
+/* Regla de tiempo */
+.ruler {
+    position: relative;
+    height: 24px;
+    border-bottom: 1px solid #ffffff;
+    background-color: #0a0a0a;
+    overflow: hidden;
+    cursor: pointer;
+    user-select: none;
+}
+
+.ruler .tick {
+    position: absolute;
+    bottom: 0;
+    width: 1px;
+    height: 6px;
+    background-color: #666666;
+}
+
+.ruler .tick.major {
+    height: 10px;
+    background-color: #ffffff;
+}
+
+.ruler .tick.major::after {
+    content: attr(data-label);
+    position: absolute;
+    left: 4px;
+    top: -12px;
+    font-size: 10px;
+    line-height: 10px;
+    color: #bbbbbb;
+    white-space: nowrap;
+}
+
+/* Cabezal de reproducción */
+.playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 1px;
+    width: 2px;
+    margin-left: -1px;
+    background-color: #ff4d4d;
+    pointer-events: none;
+    z-index: 30;
+}
+
+.rows-container {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+.row-item {
+    height: 64px;
+    border: 1px solid #ffffff;
+    background-color: #000000;
+    position: relative;
+    user-select: none;
+    margin-bottom: -1px; /* Para simular bordes compartidos */
+}
+
+.row-item.dragging {
+    opacity: 0.4;
+    border: 1px dashed #ffffff;
+}
+
+/* Estado bloqueado / silenciado visual */
+.row-item.locked {
+    opacity: 0.6;
+    pointer-events: auto; /* Permite hacer clic derecho para poder desbloquear */
+}
+
+.row-item.muted {
+    border-style: dashed;
+}
+
+/* Agarradera para cambiar el orden (jerarquía) de las filas */
+.row-grip {
+    position: absolute;
+    left: -28px;
+    top: 0;
+    bottom: 0;
+    width: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #777777;
+    font-size: 1rem;
+    letter-spacing: -2px;
+    cursor: grab;
+}
+
+.row-grip:hover {
+    color: #ffffff;
+}
+
+.row-grip:active {
+    cursor: grabbing;
+}
+
+/* Manillas en los bordes para redimensionar la línea de tiempo */
+.row-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    z-index: 10;
+}
+
+.row-handle.left {
+    left: -4px;
+}
+
+.row-handle.right {
+    right: -4px;
+}
+
+/* --- Clips (videos dentro de las filas) --- */
+.clip {
+    position: absolute;
+    top: 1px;
+    bottom: 1px;
+    left: 0;
+    background-color: #1a1a1a;
+    border: 1px solid #8a8a8a;
+    overflow: hidden;
+    cursor: grab;
+    touch-action: none;
+    z-index: 1;
+}
+
+.clip canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.row-item.locked .clip {
+    cursor: not-allowed;
+}
+
+.clip.dragging {
+    cursor: grabbing;
+    border-color: #ffffff;
+    opacity: 0.85;
+    z-index: 20;
+}
+
+.clip.invalid {
+    border-color: #ff4d4d;
+}
+
+.clip-label {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    max-width: 100%;
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 14px;
+    background-color: rgba(0, 0, 0, 0.7);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+}
+
+.clip-badge {
+    position: absolute;
+    top: 0;
+    right: 0;
+    padding: 1px 6px;
+    font-size: 10px;
+    line-height: 14px;
+    background-color: rgba(0, 0, 0, 0.7);
+    color: #7dff9b;
+    pointer-events: none;
+}
+
+.clip-badge:empty {
+    display: none;
+}
+
+/* Menú contextual flotante */
+.context-menu {
+    position: fixed;
+    background-color: #000000;
+    border: 1px solid #ffffff;
+    border-radius: 0;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.8);
+    z-index: 1000;
+    display: none;
+    padding: 4px 0;
+    min-width: 170px;
+}
+
+.context-menu-item {
+    padding: 8px 16px;
+    color: #ffffff; /* Texto blanco para las acciones principales */
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.context-menu-item:hover {
+    background-color: #ffffff;
+    color: #000000;
+}
+
+.context-menu-item.checked::before {
+    content: '✓ ';
+}
+
+.context-menu-item.danger {
+    color: #ff4d4d;
+}
+
+.context-menu-item.danger:hover {
+    background-color: #ff4d4d;
+    color: #ffffff;
+}
+
+/* Botones genéricos con borde blanco estilo minimalista */
+.action-btn {
+    background-color: transparent;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 10px 24px;
+    border-radius: 0;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.action-btn:hover {
+    background-color: #ffffff;
+    color: #000000;
+}
+
+/* Contenedor de botones Importar / Exportar */
+.data-transfer-controls {
+    display: flex;
+    gap: 20px;
 }

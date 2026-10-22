@@ -1,37 +1,93 @@
+// =====================================================================
+//  Editor de video por proyectos
+//  - Importar videos (explorador de archivos)
+//  - Frames visibles dentro de cada clip
+//  - Reproducción compuesta en un canvas (fila superior = capa superior)
+//  - Chroma key automático (verde / azul) con opción manual
+//  - Clips arrastrables: arriba/abajo (jerarquía) e izquierda/derecha (tiempo)
+// =====================================================================
+
+// --- Constantes del editor ---
+const PX_PER_SEC = 40;          // Escala de la línea de tiempo (px por segundo)
+const THUMB_H = 58;             // Alto del filmstrip (alto de la fila - bordes)
+const MAX_THUMB_W = 16000;      // Límite de ancho del canvas de miniaturas
+const PREVIEW_W = 640;          // Resolución interna de la vista previa
+const PREVIEW_H = 360;          // (bájala a 480x270 si va lento)
+const DRIFT_TOLERANCE = 0.35;   // Segundos de desfase permitidos antes de re-sincronizar un video
+const EPS = 0.001;
+
+// Ajustes del chroma key
+const CHROMA_MIN_DIFF = 20;     // Diferencia mínima entre el canal clave y los demás
+const CHROMA_K1 = 0.22;         // Por debajo: opaco. Entre K1 y K2: semitransparente
+const CHROMA_K2 = 0.5;          // Por encima: totalmente transparente
+
+// --- Elementos del DOM ---
 const grid = document.getElementById('projectGrid');
 const addBtn = document.getElementById('addProjectBtn');
 
-// Elementos de la vista y navegación
 const mainView = document.getElementById('mainView');
 const projectDetailView = document.getElementById('projectDetailView');
 const currentProjectTitle = document.getElementById('currentProjectTitle');
 const backBtn = document.getElementById('backBtn');
 const addRowBtn = document.getElementById('addRowBtn');
 const rowsContainer = document.getElementById('rowsContainer');
+const ruler = document.getElementById('ruler');
+const playhead = document.getElementById('playhead');
+const timeDisplay = document.getElementById('timeDisplay');
+
+const importBtn = document.getElementById('importBtn');
+const fileInput = document.getElementById('fileInput');
 
 const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
 
-// Estructura de almacenamiento en memoria
-let projects = {}; 
+const previewCanvas = document.getElementById('previewCanvas');
+const videoPlayerContainer = document.getElementById('videoPlayerContainer');
+const playBtn = document.getElementById('playBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const replayBtn = document.getElementById('replayBtn');
+const volumeBtn = document.getElementById('volumeBtn');
+const volumeSlider = document.getElementById('volumeSlider');
+const fullscreenBtn = document.getElementById('fullscreenBtn');
+
+// --- Estado ---
+let projects = {};
 let currentProjectId = null;
 let projectCount = 0;
 let draggedRow = null;
+let clipSeq = 0;
 
-// --- Sistema Undo / Redo ---
+const currentProject = () => projects[currentProjectId];
+
+// Reloj de la línea de tiempo
+const clock = { t: 0, playing: false, last: 0, raf: 0 };
+let masterVolume = 1;
+let masterMuted = false;
+let renderQueued = false;
+
+// =====================================================================
+//  Sistema Undo / Redo
+// =====================================================================
 let undoStack = [];
 let redoStack = [];
+
+// Serializa las filas y los clips que contienen
+function serializeRows() {
+    return Array.from(rowsContainer.children).map(row => ({
+        muted: row.classList.contains('muted'),
+        locked: row.classList.contains('locked'),
+        clips: Array.from(row.children)
+            .filter(el => el._clip)
+            .map(el => ({ id: el._clip.id, start: el._clip.start }))
+    }));
+}
 
 function recordState() {
     if (!currentProjectId || !projects[currentProjectId]) return;
 
-    // Captura el estado actual de las filas y del ancho
     const state = {
         rowsWidth: rowsContainer.style.width || '500px',
-        rows: Array.from(rowsContainer.children).map(row => ({
-            muted: row.classList.contains('muted'),
-            locked: row.classList.contains('locked')
-        }))
+        rows: serializeRows()
     };
 
     undoStack.push(JSON.stringify(state));
@@ -44,8 +100,7 @@ function undo() {
     const currentState = undoStack.pop();
     redoStack.push(currentState);
 
-    const previousState = JSON.parse(undoStack[undoStack.length - 1]);
-    applyState(previousState);
+    applyState(JSON.parse(undoStack[undoStack.length - 1]));
 }
 
 function redo() {
@@ -58,40 +113,46 @@ function redo() {
 }
 
 function applyState(state) {
-    rowsContainer.style.width = state.rowsWidth;
+    setTimelineWidth(parseInt(state.rowsWidth, 10) || 500);
     rowsContainer.innerHTML = '';
-
-    state.rows.forEach(rowData => {
-        const row = createRowElement(false);
-        if (rowData.muted) row.classList.add('muted');
-        if (rowData.locked) row.classList.add('locked');
-    });
-
+    buildRows(state.rows, currentProject());
     saveCurrentProjectRows();
+    refreshPreview();
 }
 
-// Atajos de teclado (Ctrl + Z, Ctrl + Y, Ctrl + Shift + Z)
+// Guarda en el proyecto y registra un paso de historial
+function commit() {
+    saveCurrentProjectRows();
+    recordState();
+}
+
+// Atajos de teclado
 document.addEventListener('keydown', (e) => {
     if (!currentProjectId) return; // Solo actuar dentro de un proyecto
 
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        if (e.shiftKey) {
-            redo();
-        } else {
-            undo();
-        }
-    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+    const key = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+    } else if ((e.ctrlKey || e.metaKey) && key === 'y') {
+        e.preventDefault();
         redo();
+    } else if (e.code === 'Space' && !/INPUT|TEXTAREA|BUTTON/.test(e.target.tagName)) {
+        e.preventDefault();
+        if (clock.playing) pause(); else play();
     }
 });
 
 undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
 
-// --- Funciones de Navegación ---
+// =====================================================================
+//  Navegación
+// =====================================================================
 function showMainView(pushToHistory = true) {
+    stopPlayback();
     saveCurrentProjectRows();
-    
+
     currentProjectId = null;
     projectDetailView.classList.add('hidden');
     mainView.classList.remove('hidden');
@@ -106,16 +167,20 @@ function openProjectView(projectId, pushToHistory = true) {
     const project = projects[projectId];
 
     currentProjectTitle.textContent = project.name || 'Sin título';
-    
-    // Reiniciar historial para el proyecto actual
+
+    // Reiniciar historial y reloj para el proyecto actual
     undoStack = [];
     redoStack = [];
+    clock.t = 0;
+    clock.playing = false;
 
     loadProjectRows(project);
     recordState(); // Estado inicial
 
     mainView.classList.add('hidden');
     projectDetailView.classList.remove('hidden');
+
+    refreshPreview();
 
     if (pushToHistory) {
         history.pushState({ view: 'project', id: projectId }, `#project-${projectId}`);
@@ -134,7 +199,9 @@ window.addEventListener('popstate', (e) => {
     }
 });
 
-// --- Lógica de Proyectos ---
+// =====================================================================
+//  Proyectos
+// =====================================================================
 addBtn.addEventListener('click', () => {
     projectCount++;
     const id = `proj_${Date.now()}`;
@@ -143,7 +210,8 @@ addBtn.addEventListener('click', () => {
         id: id,
         name: `Proyecto ${projectCount}`,
         rowsWidth: '500px',
-        rowsData: []
+        rowsData: [],
+        clips: {}          // Videos importados: id -> clip
     };
 
     const card = document.createElement('div');
@@ -179,64 +247,83 @@ addBtn.addEventListener('click', () => {
     grid.appendChild(card);
 });
 
-// --- Gestión de Filas por Proyecto ---
+// =====================================================================
+//  Filas por proyecto
+// =====================================================================
 function saveCurrentProjectRows() {
     if (!currentProjectId || !projects[currentProjectId]) return;
-    
+
     projects[currentProjectId].rowsWidth = rowsContainer.style.width || '500px';
-    projects[currentProjectId].rowsData = Array.from(rowsContainer.children).map(row => ({
-        muted: row.classList.contains('muted'),
-        locked: row.classList.contains('locked')
-    }));
+    projects[currentProjectId].rowsData = serializeRows();
 }
 
 function loadProjectRows(project) {
     rowsContainer.innerHTML = '';
-    rowsContainer.style.width = project.rowsWidth || '500px';
+    setTimelineWidth(parseInt(project.rowsWidth, 10) || 500);
+    buildRows(project.rowsData, project);
+}
 
-    if (project.rowsData && project.rowsData.length > 0) {
-        project.rowsData.forEach(data => {
-            const row = createRowElement(false);
-            if (data.muted) row.classList.add('muted');
-            if (data.locked) row.classList.add('locked');
+// Reconstruye filas y clips a partir de datos guardados
+function buildRows(rowsData, project) {
+    (rowsData || []).forEach(data => {
+        const row = createRowElement();
+        if (data.muted) row.classList.add('muted');
+        if (data.locked) row.classList.add('locked');
+
+        (data.clips || []).forEach(c => {
+            const clip = project.clips[c.id];
+            if (!clip) return;
+            clip.start = c.start;
+            placeClip(row, clip);
         });
-    }
+    });
 }
 
 addRowBtn.addEventListener('click', () => {
     if (!currentProjectId) return;
-    createRowElement(true);
+    createRowElement();
+    commit();
 });
 
-function createRowElement(record = true) {
+function createRowElement(atTop = false) {
     const row = document.createElement('div');
     row.className = 'row-item';
-    
+
+    // Agarradera para reordenar la fila (cambia la jerarquía de capas)
+    const grip = document.createElement('div');
+    grip.className = 'row-grip';
+    grip.title = 'Arrastra para cambiar la jerarquía (arriba = por encima)';
+    grip.textContent = '⋮⋮';
+    grip.addEventListener('mousedown', () => { row.draggable = true; });
+    grip.addEventListener('mouseup', () => { row.draggable = false; });
+
     const handleLeft = document.createElement('div');
     handleLeft.className = 'row-handle left';
-    
+
     const handleRight = document.createElement('div');
     handleRight.className = 'row-handle right';
-    
+
+    row.appendChild(grip);
     row.appendChild(handleLeft);
     row.appendChild(handleRight);
-    
-    row.draggable = true;
-    
+
     row.addEventListener('dragstart', (e) => {
         draggedRow = row;
         e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', 'row');
         setTimeout(() => row.classList.add('dragging'), 0);
     });
-    
+
     row.addEventListener('dragend', () => {
+        row.draggable = false;
         row.classList.remove('dragging');
         draggedRow = null;
-        saveCurrentProjectRows();
-        recordState();
+        commit();
+        refreshPreview();
     });
-    
+
     row.addEventListener('dragover', (e) => {
+        if (!draggedRow) return;
         e.preventDefault();
         const targetRow = e.target.closest('.row-item');
         if (targetRow && targetRow !== draggedRow) {
@@ -256,15 +343,16 @@ function createRowElement(record = true) {
     });
 
     setupResizeHandlers(handleLeft, handleRight);
-    rowsContainer.appendChild(row);
 
-    saveCurrentProjectRows();
-    if (record) recordState();
-
+    if (atTop) {
+        rowsContainer.insertBefore(row, rowsContainer.firstChild);
+    } else {
+        rowsContainer.appendChild(row);
+    }
     return row;
 }
 
-// Redimensionamiento (Estiramiento y Acortamiento)
+// Redimensionamiento de la línea de tiempo (Estiramiento y Acortamiento)
 function setupResizeHandlers(leftHandle, rightHandle) {
     const initResize = (e, direction) => {
         e.preventDefault();
@@ -273,16 +361,16 @@ function setupResizeHandlers(leftHandle, rightHandle) {
 
         const onMouseMove = (moveEvent) => {
             const deltaX = moveEvent.clientX - startX;
-            let newWidth = direction === 'right' ? startWidth + deltaX : startWidth - deltaX;
+            const newWidth = direction === 'right' ? startWidth + deltaX : startWidth - deltaX;
+            const minWidth = Math.ceil(contentEnd() * PX_PER_SEC) + 20; // No cortar clips
 
             if (newWidth > 100) {
-                rowsContainer.style.width = `${newWidth}px`;
+                setTimelineWidth(Math.max(newWidth, minWidth));
             }
         };
 
         const onMouseUp = () => {
-            saveCurrentProjectRows();
-            recordState(); // Registra el cambio de estiramiento/acortamiento en el historial
+            commit(); // Registra el cambio de estiramiento/acortamiento en el historial
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
         };
@@ -295,64 +383,123 @@ function setupResizeHandlers(leftHandle, rightHandle) {
     rightHandle.addEventListener('mousedown', (e) => initResize(e, 'right'));
 }
 
-// Menú contextual flotante para Filas
-// --- Menú contextual flotante para Filas ---
-const contextMenu = document.createElement('div');
-contextMenu.className = 'context-menu';
-contextMenu.innerHTML = `
+// =====================================================================
+//  Ancho de la línea de tiempo y regla
+// =====================================================================
+function setTimelineWidth(px) {
+    px = Math.max(100, Math.round(px));
+    rowsContainer.style.width = `${px}px`;
+    ruler.style.width = `${px}px`;
+    renderRuler(px);
+}
+
+function renderRuler(px) {
+    const secs = Math.ceil(px / PX_PER_SEC);
+    let html = '';
+    for (let s = 0; s <= secs; s++) {
+        const major = s % 5 === 0;
+        const label = major ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : '';
+        html += `<span class="tick${major ? ' major' : ''}" data-label="${label}" style="left:${s * PX_PER_SEC + 1}px"></span>`;
+    }
+    ruler.innerHTML = html;
+}
+
+// Amplía la línea de tiempo si algún clip se sale por la derecha
+function fitTimeline() {
+    const needed = Math.ceil(contentEnd() * PX_PER_SEC) + 20;
+    if (needed > rowsContainer.offsetWidth) setTimelineWidth(needed);
+}
+
+// Click / arrastre sobre la regla para moverse en el tiempo
+ruler.addEventListener('pointerdown', (e) => {
+    if (!currentProjectId) return;
+    e.preventDefault();
+
+    const seekTo = (ev) => {
+        const rect = ruler.getBoundingClientRect();
+        seek((ev.clientX - rect.left - 1) / PX_PER_SEC);
+    };
+    const onUp = () => {
+        window.removeEventListener('pointermove', seekTo);
+        window.removeEventListener('pointerup', onUp);
+    };
+
+    seekTo(e);
+    window.addEventListener('pointermove', seekTo);
+    window.addEventListener('pointerup', onUp);
+});
+
+// =====================================================================
+//  Menús contextuales
+// =====================================================================
+const menus = [];
+
+function createMenu(html) {
+    const menu = document.createElement('div');
+    menu.className = 'context-menu';
+    menu.innerHTML = html;
+    document.body.appendChild(menu);
+    menus.push(menu);
+    return menu;
+}
+
+function hideMenus() {
+    menus.forEach(m => { m.style.display = 'none'; });
+}
+
+function openMenu(menu, x, y) {
+    hideMenus();
+    menu.style.display = 'block';
+    const w = menu.offsetWidth;
+    const h = menu.offsetHeight;
+    menu.style.left = `${Math.max(0, Math.min(x, window.innerWidth - w - 4))}px`;
+    menu.style.top = `${Math.max(0, Math.min(y, window.innerHeight - h - 4))}px`;
+}
+
+document.addEventListener('click', hideMenus);
+
+// --- Menú de filas ---
+const contextMenu = createMenu(`
     <div class="context-menu-item" id="muteRowOption">Silenciar</div>
     <div class="context-menu-item" id="unmuteRowOption">Sonorizar</div>
     <div class="context-menu-item" id="lockRowOption">Bloquear</div>
     <div class="context-menu-item danger" id="deleteRowOption">Borrar</div>
-`;
-document.body.appendChild(contextMenu);
+`);
 
 let rowTarget = null;
 
 function showContextMenu(x, y, row) {
     rowTarget = row;
-    projectContextMenu.style.display = 'none';
 
-    // Cambiar dinámicamente el texto y acción de Bloquear/Desbloquear según el estado
-    const lockOption = document.getElementById('lockRowOption');
-    if (row.classList.contains('locked')) {
-        lockOption.textContent = 'Desbloquear';
-    } else {
-        lockOption.textContent = 'Bloquear';
-    }
+    const muted = row.classList.contains('muted');
+    document.getElementById('muteRowOption').style.display = muted ? 'none' : 'block';
+    document.getElementById('unmuteRowOption').style.display = muted ? 'block' : 'none';
+    document.getElementById('lockRowOption').textContent =
+        row.classList.contains('locked') ? 'Desbloquear' : 'Bloquear';
 
-    contextMenu.style.left = `${x}px`;
-    contextMenu.style.top = `${y}px`;
-    contextMenu.style.display = 'block';
+    openMenu(contextMenu, x, y);
 }
 
-document.addEventListener('click', () => {
-    contextMenu.style.display = 'none';
-});
-
-// Opciones del Menú Contextual de Filas
 document.getElementById('muteRowOption').addEventListener('click', () => {
     if (rowTarget) {
         rowTarget.classList.add('muted');
-        saveCurrentProjectRows();
-        recordState();
+        commit();
+        refreshPreview();
     }
 });
 
 document.getElementById('unmuteRowOption').addEventListener('click', () => {
     if (rowTarget) {
         rowTarget.classList.remove('muted');
-        saveCurrentProjectRows();
-        recordState();
+        commit();
+        refreshPreview();
     }
 });
 
 document.getElementById('lockRowOption').addEventListener('click', () => {
     if (rowTarget) {
-        // Alterna el estado de bloqueo
         rowTarget.classList.toggle('locked');
-        saveCurrentProjectRows();
-        recordState();
+        commit();
     }
 });
 
@@ -360,16 +507,15 @@ document.getElementById('deleteRowOption').addEventListener('click', () => {
     if (rowTarget) {
         rowTarget.remove();
         rowTarget = null;
-        saveCurrentProjectRows();
-        recordState(); // Permite recuperar la fila eliminada con Ctrl+Z
+        commit(); // Permite recuperar la fila eliminada con Ctrl+Z
+        refreshPreview();
     }
 });
 
-// --- Menú contextual flotante para Proyectos ---
-const projectContextMenu = document.createElement('div');
-projectContextMenu.className = 'context-menu';
-projectContextMenu.innerHTML = `<div class="context-menu-item danger" id="deleteProjectOption">Borrar proyecto</div>`;
-document.body.appendChild(projectContextMenu);
+// --- Menú de proyectos ---
+const projectContextMenu = createMenu(
+    `<div class="context-menu-item danger" id="deleteProjectOption">Borrar proyecto</div>`
+);
 
 let projectToDeleteId = null;
 let cardToDelete = null;
@@ -377,77 +523,642 @@ let cardToDelete = null;
 function showProjectContextMenu(x, y, projectId, cardElement) {
     projectToDeleteId = projectId;
     cardToDelete = cardElement;
-    
-    contextMenu.style.display = 'none';
-
-    projectContextMenu.style.left = `${x}px`;
-    projectContextMenu.style.top = `${y}px`;
-    projectContextMenu.style.display = 'block';
+    openMenu(projectContextMenu, x, y);
 }
-
-document.addEventListener('click', (e) => {
-    if (!projectContextMenu.contains(e.target)) {
-        projectContextMenu.style.display = 'none';
-    }
-});
 
 document.getElementById('deleteProjectOption').addEventListener('click', () => {
     if (projectToDeleteId && cardToDelete) {
+        Object.values(projects[projectToDeleteId].clips).forEach(disposeClip);
         delete projects[projectToDeleteId];
         cardToDelete.remove();
         projectToDeleteId = null;
         cardToDelete = null;
-        projectContextMenu.style.display = 'none';
-    }
-});
-// --- Lógica del Reproductor de Video ---
-const videoPreview = document.getElementById('videoPreview');
-const videoPlayerContainer = document.getElementById('videoPlayerContainer');
-
-const playBtn = document.getElementById('playBtn');
-const pauseBtn = document.getElementById('pauseBtn');
-const replayBtn = document.getElementById('replayBtn');
-
-const volumeBtn = document.getElementById('volumeBtn');
-const volumeSlider = document.getElementById('volumeSlider');
-const fullscreenBtn = document.getElementById('fullscreenBtn');
-
-// Reproducir
-playBtn.addEventListener('click', () => {
-    if (videoPreview.src) {
-        videoPreview.play();
     }
 });
 
-// Pausar
-pauseBtn.addEventListener('click', () => {
-    videoPreview.pause();
+// --- Menú de clips ---
+const clipMenu = createMenu(`
+    <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
+    <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
+    <div class="context-menu-item" data-chroma="none">No quitar fondo</div>
+    <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
+`);
+
+let clipTarget = null;
+
+function showClipContextMenu(x, y, clip) {
+    clipTarget = clip;
+    clipMenu.querySelectorAll('[data-chroma]').forEach(item => {
+        item.classList.toggle('checked', item.dataset.chroma === clip.chroma);
+    });
+    openMenu(clipMenu, x, y);
+}
+
+clipMenu.addEventListener('click', (e) => {
+    const item = e.target.closest('.context-menu-item');
+    if (!item || !clipTarget) return;
+
+    if (item.dataset.chroma) {
+        setClipChroma(clipTarget, item.dataset.chroma);
+    } else if (item.dataset.action === 'delete') {
+        deleteClip(clipTarget);
+    }
 });
 
-// Reiniciar (Replay)
-replayBtn.addEventListener('click', () => {
-    videoPreview.currentTime = 0;
-    videoPreview.play();
+// =====================================================================
+//  Clips: importar, crear elemento, miniaturas
+// =====================================================================
+importBtn.addEventListener('click', () => {
+    if (!currentProjectId) return;
+    fileInput.click(); // Abre el explorador de archivos
 });
 
-// Control de Volumen mediante Slider
+fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files);
+    fileInput.value = ''; // Permite volver a elegir el mismo archivo
+
+    const failed = [];
+    for (const file of files) {
+        const ok = await importVideoFile(file);
+        if (!ok) failed.push(file.name);
+    }
+    if (failed.length) {
+        alert(`El navegador no pudo cargar estos archivos (formato o códec no compatible):\n\n${failed.join('\n')}`);
+    }
+});
+
+// Primera fila vacía (de arriba hacia abajo) que no esté bloqueada
+function findEmptyRow() {
+    return Array.from(rowsContainer.children).find(row =>
+        !row.classList.contains('locked') &&
+        !Array.from(row.children).some(el => el._clip)
+    );
+}
+
+async function importVideoFile(file) {
+    const projectId = currentProjectId;
+    if (!projectId) return false;
+
+    const clip = await loadClip(file);
+    if (!clip) return false;
+
+    // Si el usuario salió del proyecto mientras cargaba, se descarta
+    if (projectId !== currentProjectId) {
+        disposeClip(clip);
+        return true;
+    }
+
+    currentProject().clips[clip.id] = clip;
+
+    // Fila vacía si hay; si no, se crea una nueva ARRIBA (queda por encima de las demás)
+    const row = findEmptyRow() || createRowElement(true);
+    clip.start = 0;
+    placeClip(row, clip);
+    fitTimeline();
+    commit();
+
+    queueThumbnails(clip);
+    refreshPreview();
+    return true;
+}
+
+// Carga el archivo en un <video> y devuelve el objeto clip (o null si falla)
+function loadClip(file) {
+    return new Promise((resolve) => {
+        const url = URL.createObjectURL(file);
+        const video = document.createElement('video');
+        video.preload = 'auto';
+        video.playsInline = true;
+
+        const fail = () => {
+            video.removeAttribute('src');
+            URL.revokeObjectURL(url);
+            resolve(null);
+        };
+
+        video.addEventListener('error', fail, { once: true });
+        video.addEventListener('loadeddata', () => {
+            if (!isFinite(video.duration) || video.duration <= 0 || !video.videoWidth) {
+                fail();
+                return;
+            }
+
+            // Al terminar un salto en el tiempo, repinta la vista previa si está en pausa
+            video.addEventListener('seeked', () => {
+                if (!clock.playing && currentProjectId) requestRender();
+            });
+
+            resolve({
+                id: `clip_${Date.now()}_${++clipSeq}`,
+                name: file.name,
+                url,
+                video,
+                duration: video.duration,
+                aspect: video.videoWidth / video.videoHeight,
+                start: 0,                // Segundo en que aparece en la línea de tiempo
+                chroma: 'none',          // 'none' | 'green' | 'blue'
+                chromaManual: false,
+                el: null,
+                thumbs: null,
+                badge: null
+            });
+        }, { once: true });
+
+        video.src = url;
+    });
+}
+
+function disposeClip(clip) {
+    clip.video.pause();
+    clip.video.removeAttribute('src');
+    clip.video.load();
+    URL.revokeObjectURL(clip.url);
+}
+
+function createClipElement(clip) {
+    const el = document.createElement('div');
+    el.className = 'clip';
+    el.title = clip.name;
+    el.style.width = `${clip.duration * PX_PER_SEC}px`;
+    el._clip = clip;
+    clip.el = el;
+
+    // Canvas donde se dibujan los frames (filmstrip)
+    const thumbs = document.createElement('canvas');
+    thumbs.width = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
+    thumbs.height = THUMB_H;
+    const tctx = thumbs.getContext('2d');
+    tctx.fillStyle = '#1a1a1a';
+    tctx.fillRect(0, 0, thumbs.width, thumbs.height);
+    clip.thumbs = thumbs;
+
+    const label = document.createElement('span');
+    label.className = 'clip-label';
+    label.textContent = clip.name;
+
+    const badge = document.createElement('span');
+    badge.className = 'clip-badge';
+    clip.badge = badge;
+
+    el.append(thumbs, label, badge);
+    updateClipBadge(clip);
+
+    setupClipDrag(clip);
+
+    el.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation(); // Evita que se abra el menú de la fila
+        showClipContextMenu(e.clientX, e.clientY, clip);
+    });
+
+    return el;
+}
+
+// Coloca el clip dentro de una fila en su posición de tiempo
+function placeClip(row, clip) {
+    if (!clip.el) createClipElement(clip);
+    clip.el.style.left = `${clip.start * PX_PER_SEC}px`;
+    row.appendChild(clip.el);
+}
+
+function deleteClip(clip) {
+    const row = clip.el.parentElement;
+    if (row && row.classList.contains('locked')) return;
+    clip.video.pause();
+    clip.el.remove(); // El clip sigue guardado, así Ctrl+Z puede recuperarlo
+    commit();
+    refreshPreview();
+}
+
+function updateClipBadge(clip) {
+    clip.badge.textContent =
+        clip.chroma === 'green' ? 'Pantalla verde' :
+        clip.chroma === 'blue' ? 'Pantalla azul' : '';
+}
+
+function setClipChroma(clip, mode) {
+    clip.chroma = mode;
+    clip.chromaManual = true; // Desactiva la detección automática
+    updateClipBadge(clip);
+    requestRender();
+}
+
+// --- Miniaturas (se generan de a un video a la vez) ---
+let thumbQueue = Promise.resolve();
+
+function queueThumbnails(clip) {
+    thumbQueue = thumbQueue.then(() => buildThumbnails(clip)).catch(() => {});
+}
+
+function waitFor(target, eventName, ms = 3000) {
+    return new Promise((resolve) => {
+        const done = () => {
+            clearTimeout(timer);
+            target.removeEventListener(eventName, done);
+            resolve();
+        };
+        const timer = setTimeout(done, ms);
+        target.addEventListener(eventName, done);
+    });
+}
+
+async function buildThumbnails(clip) {
+    // Se usa un video aparte para no interferir con la reproducción
+    const tv = document.createElement('video');
+    tv.muted = true;
+    tv.preload = 'auto';
+    tv.src = clip.url;
+    await waitFor(tv, 'loadeddata');
+
+    const canvas = clip.thumbs;
+    const ctx = canvas.getContext('2d');
+    const tileW = Math.max(16, Math.round(canvas.height * clip.aspect));
+    const tiles = Math.ceil(canvas.width / tileW);
+
+    for (let i = 0; i < tiles; i++) {
+        if (tv.readyState < 2) break;
+
+        const frac = Math.min(0.999, (i * tileW + tileW / 2) / canvas.width);
+        tv.currentTime = Math.max(0.01, Math.min(clip.duration - 0.05, frac * clip.duration));
+        await waitFor(tv, 'seeked');
+
+        ctx.drawImage(tv, i * tileW, 0, tileW, canvas.height);
+
+        // Con el primer frame se detecta si el video tiene pantalla verde o azul
+        if (i === 0 && !clip.chromaManual) {
+            const mode = detectChromaBackground(tv);
+            if (mode !== 'none') {
+                clip.chroma = mode;
+                updateClipBadge(clip);
+                requestRender();
+            }
+        }
+    }
+
+    tv.removeAttribute('src');
+    tv.load();
+}
+
+// Mira el borde del frame: si es mayormente verde o azul intenso, es una pantalla de chroma
+function detectChromaBackground(video) {
+    const W = 64, H = 36;
+    const probe = document.createElement('canvas');
+    probe.width = W;
+    probe.height = H;
+    const ctx = probe.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, W, H);
+    const d = ctx.getImageData(0, 0, W, H).data;
+
+    let green = 0, blue = 0, total = 0;
+    for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+            if (!(x < 4 || x >= W - 4 || y < 3 || y >= H - 3)) continue;
+            const i = (y * W + x) * 4;
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            total++;
+            if (g > 80 && g > r * 1.35 && g > b * 1.35) green++;
+            else if (b > 80 && b > r * 1.4 && b > g * 1.25) blue++;
+        }
+    }
+
+    if (green / total > 0.6) return 'green';
+    if (blue / total > 0.6) return 'blue';
+    return 'none';
+}
+
+// =====================================================================
+//  Arrastrar clips (vertical = jerarquía, horizontal = tiempo)
+// =====================================================================
+function clipsInRow(row, except) {
+    return Array.from(row.children)
+        .filter(el => el._clip && el._clip !== except)
+        .map(el => el._clip);
+}
+
+function overlapsAny(row, clip, start) {
+    const end = start + clip.duration;
+    return clipsInRow(row, clip).some(o =>
+        start < o.start + o.duration - EPS && end > o.start + EPS
+    );
+}
+
+// Posición libre más cercana a la deseada (los clips de una misma fila no se pisan)
+function findFreeStart(row, clip, desired) {
+    desired = Math.max(0, desired);
+    if (!overlapsAny(row, clip, desired)) return desired;
+
+    const candidates = [0];
+    clipsInRow(row, clip).forEach(o => {
+        candidates.push(o.start + o.duration, o.start - clip.duration);
+    });
+
+    let best = null;
+    for (const c of candidates) {
+        if (c < 0 || overlapsAny(row, clip, c)) continue;
+        if (best === null || Math.abs(c - desired) < Math.abs(best - desired)) best = c;
+    }
+    return best === null ? desired : best;
+}
+
+function rowFromPoint(y) {
+    const rows = Array.from(rowsContainer.children);
+    if (!rows.length) return null;
+    for (const r of rows) {
+        const b = r.getBoundingClientRect();
+        if (y >= b.top && y < b.bottom) return r;
+    }
+    return y < rows[0].getBoundingClientRect().top ? rows[0] : rows[rows.length - 1];
+}
+
+function setupClipDrag(clip) {
+    const el = clip.el;
+
+    el.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        const homeRow = el.parentElement;
+        if (!homeRow || homeRow.classList.contains('locked')) return;
+
+        e.preventDefault();
+        hideMenus();
+
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const originStart = clip.start;
+        let moved = false;
+
+        const onMove = (ev) => {
+            if (!moved) {
+                if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 3) return;
+                moved = true;
+                el.classList.add('dragging');
+            }
+
+            // Vertical: cambia de fila (y por lo tanto de capa)
+            const target = rowFromPoint(ev.clientY);
+            if (target && target !== el.parentElement && !target.classList.contains('locked')) {
+                target.appendChild(el);
+            }
+
+            // Horizontal: cambia el segundo en el que aparece
+            clip.start = Math.max(0, originStart + (ev.clientX - startX) / PX_PER_SEC);
+            el.style.left = `${clip.start * PX_PER_SEC}px`;
+            el.classList.toggle('invalid', overlapsAny(el.parentElement, clip, clip.start));
+        };
+
+        const onUp = () => {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            window.removeEventListener('pointercancel', onUp);
+            el.classList.remove('dragging', 'invalid');
+            if (!moved) return;
+
+            const row = el.parentElement;
+            clip.start = findFreeStart(row, clip, clip.start);
+            el.style.left = `${clip.start * PX_PER_SEC}px`;
+
+            if (row === homeRow && Math.abs(clip.start - originStart) < EPS) return;
+
+            fitTimeline();
+            commit();
+            refreshPreview();
+        };
+
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+    });
+}
+
+// =====================================================================
+//  Reproducción y composición
+// =====================================================================
+const pctx = previewCanvas.getContext('2d');
+const scratch = document.createElement('canvas');
+scratch.width = PREVIEW_W;
+scratch.height = PREVIEW_H;
+const sctx = scratch.getContext('2d', { willReadFrequently: true });
+
+// Recorre los clips de abajo hacia arriba (la fila superior es la última = queda encima)
+function forEachClipBottomUp(callback) {
+    const rows = Array.from(rowsContainer.children);
+    for (let i = rows.length - 1; i >= 0; i--) {
+        for (const el of rows[i].children) {
+            if (el._clip) callback(el._clip, rows[i]);
+        }
+    }
+}
+
+// Segundo en el que termina el último clip
+function contentEnd() {
+    let end = 0;
+    forEachClipBottomUp(clip => { end = Math.max(end, clip.start + clip.duration); });
+    return end;
+}
+
+function render() {
+    renderQueued = false;
+
+    pctx.fillStyle = '#000000';
+    pctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
+    if (!currentProjectId) return;
+
+    forEachClipBottomUp((clip) => {
+        const local = clock.t - clip.start;
+        if (local < 0 || local >= clip.duration) return;
+
+        const v = clip.video;
+        if (v.readyState < 2 || !v.videoWidth) return;
+
+        // Ajuste "contain" dentro de la vista previa
+        const s = Math.min(PREVIEW_W / v.videoWidth, PREVIEW_H / v.videoHeight);
+        const w = Math.max(1, Math.round(v.videoWidth * s));
+        const h = Math.max(1, Math.round(v.videoHeight * s));
+        const x = Math.round((PREVIEW_W - w) / 2);
+        const y = Math.round((PREVIEW_H - h) / 2);
+
+        if (clip.chroma === 'none') {
+            pctx.drawImage(v, x, y, w, h);
+        } else {
+            sctx.clearRect(0, 0, PREVIEW_W, PREVIEW_H);
+            sctx.drawImage(v, x, y, w, h);
+            applyChromaKey(sctx, x, y, w, h, clip.chroma);
+            pctx.drawImage(scratch, 0, 0);
+        }
+    });
+}
+
+function requestRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(render);
+}
+
+// Quita el fondo verde o azul volviendo transparentes los píxeles dominados por ese canal
+function applyChromaKey(ctx, x, y, w, h, mode) {
+    const img = ctx.getImageData(x, y, w, h);
+    const d = img.data;
+
+    const kc = mode === 'green' ? 1 : 2;   // Canal clave
+    const o1 = 0;                          // Rojo siempre es "otro" canal
+    const o2 = mode === 'green' ? 2 : 1;   // El restante
+
+    for (let i = 0; i < d.length; i += 4) {
+        const key = d[i + kc];
+        const a = d[i + o1];
+        const b = d[i + o2];
+        const other = a > b ? a : b;
+        const diff = key - other;
+
+        if (diff > CHROMA_MIN_DIFF) {
+            const k = diff / key;
+            if (k >= CHROMA_K2) {
+                d[i + 3] = 0;                                         // Fondo
+            } else {
+                if (k > CHROMA_K1) {
+                    d[i + 3] = d[i + 3] * (CHROMA_K2 - k) / (CHROMA_K2 - CHROMA_K1); // Borde suave
+                }
+                d[i + kc] = other;                                    // Quita el reflejo verde/azul
+            }
+        }
+    }
+
+    ctx.putImageData(img, x, y);
+}
+
+// Pone cada video en el punto correcto: reproduce los activos, pausa el resto
+function syncClips() {
+    if (!currentProjectId) return;
+
+    for (const clip of Object.values(currentProject().clips)) {
+        const v = clip.video;
+
+        if (!clip.el || !clip.el.isConnected) { // Clip eliminado o fuera de pantalla
+            if (!v.paused) v.pause();
+            continue;
+        }
+
+        const row = clip.el.parentElement;
+        const local = clock.t - clip.start;
+        const active = local >= 0 && local < clip.duration;
+
+        if (!active) {
+            if (!v.paused) v.pause();
+            // Deja listo el primer frame para cuando llegue su momento
+            if (local < 0 && v.currentTime > 0.05 && !v.seeking) v.currentTime = 0;
+            continue;
+        }
+
+        const wantMuted = masterMuted || row.classList.contains('muted');
+        if (v.muted !== wantMuted) v.muted = wantMuted;
+        if (v.volume !== masterVolume) v.volume = masterVolume;
+
+        if (clock.playing) {
+            if (Math.abs(v.currentTime - local) > DRIFT_TOLERANCE) v.currentTime = local;
+            if (v.paused) v.play().catch(() => {});
+        } else {
+            if (!v.paused) v.pause();
+            if (Math.abs(v.currentTime - local) > 0.03) v.currentTime = local;
+        }
+    }
+}
+
+function formatTime(t) {
+    const tenths = Math.round(Math.max(0, t) * 10);
+    const m = Math.floor(tenths / 600);
+    const s = Math.floor((tenths % 600) / 10);
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${tenths % 10}`;
+}
+
+function updatePlayhead() {
+    playhead.style.left = `${clock.t * PX_PER_SEC + 1}px`;
+    timeDisplay.textContent = `${formatTime(clock.t)} / ${formatTime(contentEnd())}`;
+}
+
+function refreshPreview() {
+    syncClips();
+    render();
+    updatePlayhead();
+}
+
+function tick(ts) {
+    if (!clock.playing) return;
+
+    clock.t += Math.max(0, (ts - clock.last) / 1000);
+    clock.last = ts;
+
+    const end = contentEnd();
+    if (clock.t >= end) {
+        clock.t = Math.max(0, end - 0.001); // Se queda en el último frame
+        pause();
+        return;
+    }
+
+    syncClips();
+    render();
+    updatePlayhead();
+    clock.raf = requestAnimationFrame(tick);
+}
+
+function play() {
+    if (!currentProjectId) return;
+    const end = contentEnd();
+    if (end <= 0 || clock.playing) return;
+
+    if (clock.t >= end - 0.01) clock.t = 0; // Si estaba al final, empieza de nuevo
+
+    clock.playing = true;
+    clock.last = performance.now();
+    syncClips();
+    clock.raf = requestAnimationFrame(tick);
+}
+
+function pause() {
+    clock.playing = false;
+    cancelAnimationFrame(clock.raf);
+    refreshPreview();
+}
+
+function replay() {
+    if (!currentProjectId) return;
+    pause();
+    clock.t = 0;
+    play();
+}
+
+function seek(t) {
+    clock.t = Math.max(0, t);
+    if (clock.playing) clock.last = performance.now();
+    refreshPreview();
+}
+
+// Detiene todo (al salir del proyecto)
+function stopPlayback() {
+    clock.playing = false;
+    cancelAnimationFrame(clock.raf);
+    if (currentProjectId && projects[currentProjectId]) {
+        Object.values(projects[currentProjectId].clips).forEach(c => c.video.pause());
+    }
+}
+
+playBtn.addEventListener('click', play);
+pauseBtn.addEventListener('click', pause);
+replayBtn.addEventListener('click', replay);
+
+// --- Volumen ---
 volumeSlider.addEventListener('input', (e) => {
-    const value = e.target.value;
-    videoPreview.volume = value;
-    videoPreview.muted = (value === '0');
+    masterVolume = parseFloat(e.target.value);
+    masterMuted = masterVolume === 0;
+    syncClips();
 });
 
-// Botón Mute / Unmute al hacer click en el icono de sonido
 volumeBtn.addEventListener('click', () => {
-    videoPreview.muted = !videoPreview.muted;
-    if (videoPreview.muted) {
-        volumeSlider.value = 0;
-    } else {
-        volumeSlider.value = videoPreview.volume || 1;
-    }
+    masterMuted = !masterMuted;
+    if (!masterMuted && masterVolume === 0) masterVolume = 1;
+    volumeSlider.value = masterMuted ? 0 : masterVolume;
+    syncClips();
 });
 
-// Control de Pantalla Completa (Fullscreen)
+// --- Pantalla completa ---
 fullscreenBtn.addEventListener('click', () => {
     if (!document.fullscreenElement) {
         if (videoPlayerContainer.requestFullscreen) {
@@ -457,9 +1168,11 @@ fullscreenBtn.addEventListener('click', () => {
         } else if (videoPlayerContainer.msRequestFullscreen) { /* IE11 */
             videoPlayerContainer.msRequestFullscreen();
         }
-    } else {
-        if (document.exitFullscreen) {
-            document.exitFullscreen();
-        }
+    } else if (document.exitFullscreen) {
+        document.exitFullscreen();
     }
 });
+
+// --- Inicio ---
+setTimelineWidth(500);
+updatePlayhead();

@@ -23,12 +23,12 @@
         </div>
     </div>
 
-    <!-- VISTA EXCLUSIVA DEL PROYECTO -->
+    <!-- VISTA EXCLUSIVA DEL PROYECTO (editor) -->
     <div id="projectDetailView" class="hidden">
         <header class="project-header">
             <button id="backBtn" class="back-btn">&lt;- Volver</button>
             <h2 id="currentProjectTitle">Nombre del Proyecto</h2>
-            
+
             <!-- Botones Deshacer y Rehacer -->
             <div class="history-controls">
                 <button id="undoBtn" class="icon-btn" title="Deshacer (Ctrl + Z)">↶</button>
@@ -36,21 +36,18 @@
             </div>
         </header>
 
-        <!-- SECCIÓN SUPERIOR: Controles de reproducción y Reproductor -->
+        <!-- SECCIÓN SUPERIOR: Controles de reproducción y vista previa -->
         <div class="top-editor-section">
             <div class="media-controls">
-                <button id="playBtn" class="media-btn" title="Play">▶</button>
-                <button id="pauseBtn" class="media-btn" title="Pause">❚❚</button>
-                <button id="replayBtn" class="media-btn" title="Replay">↻</button>
+                <button id="playBtn" class="media-btn" title="Reproducir (Espacio)">▶</button>
+                <button id="pauseBtn" class="media-btn" title="Pausar (Espacio)">❚❚</button>
+                <button id="replayBtn" class="media-btn" title="Volver a empezar">↻</button>
+                <span id="timeDisplay" class="time-display">00:00.0 / 00:00.0</span>
             </div>
 
-            <!-- REPRODUCTOR DE VIDEO / CUADRADO BLANCO -->
+            <!-- VISTA PREVIA: aquí se componen todas las capas (canvas) -->
             <div class="video-player-container" id="videoPlayerContainer">
-                <video id="videoPreview" preload="metadata">
-                    <!-- Aquí se cargará la fuente del video del proyecto -->
-                    <source src="" type="video/mp4">
-                    Tu navegador no soporta reproducción de video HTML5.
-                </video>
+                <canvas id="previewCanvas" width="640" height="360"></canvas>
 
                 <!-- Overlay de controles inferiores del video -->
                 <div class="video-controls-overlay">
@@ -72,13 +69,20 @@
             </div>
         </div>
 
-        <!-- Controles y contenedor de filas -->
+        <!-- Controles y línea de tiempo -->
         <div class="project-workspace">
             <button id="addRowBtn" class="add-row-btn">+ Nueva fila</button>
-            
+
             <div class="workspace-content">
-                <div id="rowsContainer" class="rows-container" style="width: 500px;">
-                    <!-- Las filas se agregarán aquí dinámicamente -->
+                <div class="timeline" id="timeline">
+                    <!-- Regla de tiempo (click o arrastre para moverte) -->
+                    <div class="ruler" id="ruler"></div>
+
+                    <!-- Las filas (capas) se agregan aquí dinámicamente. Fila superior = capa superior -->
+                    <div id="rowsContainer" class="rows-container" style="width: 500px;"></div>
+
+                    <!-- Cabezal de reproducción -->
+                    <div class="playhead" id="playhead"></div>
                 </div>
 
                 <!-- Botones de Importar / Exportar -->
@@ -86,6 +90,9 @@
                     <button id="importBtn" class="action-btn">Importar</button>
                     <button id="exportBtn" class="action-btn">Exportar</button>
                 </div>
+
+                <!-- Selector de archivos (se abre con el botón Importar) -->
+                <input type="file" id="fileInput" accept="video/*" multiple hidden>
             </div>
         </div>
     </div>
