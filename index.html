@@ -117,6 +117,11 @@
             </div>
         </div>
     </div>
+     <!-- Añade esto antes de cerrar el <body> en index.html si deseas mostrar progreso de exportación -->
+<div id="exportModal" class="hidden" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.8); z-index:9999; display:flex; justify-content:center; align-items:center; flex-direction:column; color:white;">
+    <h2>Exportando video...</h2>
+    <p id="exportProgress">0%</p>
+</div>
 
     <script src="main.js"></script>
 </body>
