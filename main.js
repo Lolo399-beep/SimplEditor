@@ -1369,6 +1369,136 @@ function updateViewWidth() {
 window.addEventListener('resize', updateViewWidth);
 if (window.ResizeObserver) new ResizeObserver(updateViewWidth).observe(document.documentElement);
 updateViewWidth();
+// =====================================================================
+//  Sistema de Exportación a MP4 (Descarga instantánea al finalizar)
+// =====================================================================
+
+const exportBtn = document.getElementById('exportBtn');
+const exportModal = document.getElementById('exportModal');
+const exportProgress = document.getElementById('exportProgress');
+
+exportBtn.addEventListener('click', async () => {
+    if (!currentProjectId) return;
+    const end = contentEnd();
+    if (end <= 0) {
+        alert('El proyecto está vacío o no tiene duración.');
+        return;
+    }
+
+    // 1. Abrir el explorador de archivos de inmediato para elegir nombre y ubicación (si el navegador lo soporta)
+    let fileHandle = null;
+    if (window.showSaveFilePicker) {
+        try {
+            const options = {
+                suggestedName: `${currentProject().name || 'video_editado'}.mp4`,
+                types: [{
+                    description: 'Video MP4',
+                    accept: { 'video/mp4': ['.mp4'] }
+                }],
+            };
+            fileHandle = await window.showSaveFilePicker(options);
+        } catch (err) {
+            if (err.name === 'AbortError') return; // Si el usuario cancela, no hacemos nada
+        }
+    }
+
+    // Mostrar modal de progreso mientras graba en tiempo real
+    if (exportModal) exportModal.classList.remove('hidden');
+    pause();
+
+    try {
+        // Capturamos directamente el stream del canvas de previsualización a 30 FPS
+        const stream = previewCanvas.captureStream(30);
+
+        // Detectar el mejor tipo MIME compatible para MP4 o WebM renombrado a MP4
+        let supportedType = 'video/mp4';
+        if (MediaRecorder.isTypeSupported('video/mp4')) {
+            supportedType = 'video/mp4';
+        } else if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9,opus')) {
+            supportedType = 'video/webm; codecs=vp9,opus';
+        } else {
+            supportedType = 'video/webm';
+        }
+
+        const mediaRecorder = new MediaRecorder(stream, { mimeType: supportedType });
+        const chunks = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) chunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+            // Forzar extensión .mp4 en el Blob
+            const blob = new Blob(chunks, { type: 'video/mp4' });
+
+            if (fileHandle) {
+                try {
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                } catch (writeErr) {
+                    console.error('Error al guardar con File System Access API:', writeErr);
+                    fallbackDownloadMP4(blob);
+                }
+            } else {
+                fallbackDownloadMP4(blob);
+            }
+
+            if (exportModal) exportModal.classList.add('hidden');
+            alert('¡Video exportado con éxito!');
+        };
+
+        // Iniciar la grabación del stream
+        mediaRecorder.start();
+
+        // Reproducir el timeline desde el inicio para grabar de forma fluida
+        clock.t = 0;
+        clock.playing = true;
+        clock.last = performance.now();
+
+        const exportTick = (ts) => {
+            if (!clock.playing) return;
+            clock.t += Math.max(0, (ts - clock.last) / 1000);
+            clock.last = ts;
+
+            if (exportProgress) {
+                const percent = Math.min(100, Math.round((clock.t / end) * 100));
+                exportProgress.textContent = `${percent}%`;
+            }
+
+            if (clock.t >= end) {
+                clock.playing = false;
+                mediaRecorder.stop(); // Al detenerse, se dispara la descarga instantánea
+                return;
+            }
+
+            syncClips();
+            render();
+            requestAnimationFrame(exportTick);
+        };
+
+        requestAnimationFrame(exportTick);
+
+    } catch (err) {
+        console.error(err);
+        alert('Hubo un error al exportar el video.');
+        if (exportModal) exportModal.classList.add('hidden');
+    }
+});
+
+function fallbackDownloadMP4(blob) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = `${currentProject().name || 'video_editado'}.mp4`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+    }, 100);
+}
 
 // --- Inicio ---
 setTimelineWidth(500);
