@@ -25,46 +25,67 @@
 
     <!-- VISTA EXCLUSIVA DEL PROYECTO (editor) -->
     <div id="projectDetailView" class="hidden">
-        <header class="project-header">
-            <button id="backBtn" class="back-btn">&lt;- Volver</button>
-            <h2 id="currentProjectTitle">Nombre del Proyecto</h2>
+        <!-- Cabecera + vista previa: se quedan visibles al desplazarte a izquierda / derecha -->
+        <div class="sticky-top" id="stickyTop">
+            <header class="project-header">
+                <button id="backBtn" class="back-btn">&lt;- Volver</button>
+                <h2 id="currentProjectTitle">Nombre del Proyecto</h2>
 
-            <!-- Botones Deshacer y Rehacer -->
-            <div class="history-controls">
-                <button id="undoBtn" class="icon-btn" title="Deshacer (Ctrl + Z)">↶</button>
-                <button id="redoBtn" class="icon-btn" title="Rehacer (Ctrl + Y / Ctrl + Shift + Z)">↷</button>
-            </div>
-        </header>
+                <!-- Botones Deshacer y Rehacer -->
+                <div class="history-controls">
+                    <button id="undoBtn" class="icon-btn" title="Deshacer (Ctrl + Z)">↶</button>
+                    <button id="redoBtn" class="icon-btn" title="Rehacer (Ctrl + Y / Ctrl + Shift + Z)">↷</button>
+                </div>
+            </header>
 
-        <!-- SECCIÓN SUPERIOR: Controles de reproducción y vista previa -->
-        <div class="top-editor-section">
-            <div class="media-controls">
-                <button id="playBtn" class="media-btn" title="Reproducir (Espacio)">▶</button>
-                <button id="pauseBtn" class="media-btn" title="Pausar (Espacio)">❚❚</button>
-                <button id="replayBtn" class="media-btn" title="Volver a empezar">↻</button>
-                <span id="timeDisplay" class="time-display">00:00.0 / 00:00.0</span>
-            </div>
+            <!-- SECCIÓN SUPERIOR: Controles de reproducción y vista previa -->
+            <div class="top-editor-section">
+                <div class="media-controls">
+                    <button id="playBtn" class="media-btn" title="Reproducir (Espacio)">▶</button>
+                    <button id="pauseBtn" class="media-btn" title="Pausar (Espacio)">❚❚</button>
+                    <button id="replayBtn" class="media-btn" title="Volver a empezar">↻</button>
+                    <span id="timeDisplay" class="time-display">00:00.0 / 00:00.0</span>
+                </div>
 
-            <!-- VISTA PREVIA: aquí se componen todas las capas (canvas) -->
-            <div class="video-player-container" id="videoPlayerContainer">
-                <canvas id="previewCanvas" width="640" height="360"></canvas>
+                <!-- VISTA PREVIA: aquí se componen todas las capas (canvas) -->
+                <div class="video-player-container" id="videoPlayerContainer">
+                    <canvas id="previewCanvas" width="640" height="360"></canvas>
 
-                <!-- Overlay de controles inferiores del video -->
-                <div class="video-controls-overlay">
-                    <div class="volume-control-wrapper">
-                        <button id="volumeBtn" class="video-btn" title="Volumen">
-                            <svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
-                            </svg>
-                        </button>
-                        <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.05" value="1" title="Ajustar volumen">
+                    <!-- Overlay de controles inferiores del video -->
+                    <div class="video-controls-overlay">
+                        <!-- Barra para ir a un momento exacto (solo en pantalla completa) -->
+                        <div class="fs-seek fs-only" id="fsSeek" title="Ir a un momento exacto">
+                            <div class="fs-seek-track">
+                                <div class="fs-seek-fill" id="fsSeekFill"></div>
+                                <div class="fs-seek-thumb" id="fsSeekThumb"></div>
+                            </div>
+                            <div class="fs-seek-tip" id="fsSeekTip">00:00.0</div>
+                        </div>
+
+                        <div class="controls-row">
+                            <div class="controls-left">
+                                <!-- Play / pausa (solo en pantalla completa) -->
+                                <button id="fsPlayBtn" class="video-btn fs-only" title="Reproducir / Pausar (Espacio)">▶</button>
+
+                                <div class="volume-control-wrapper">
+                                    <button id="volumeBtn" class="video-btn" title="Volumen">
+                                        <svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+                                        </svg>
+                                    </button>
+                                    <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.05" value="1" title="Ajustar volumen">
+                                </div>
+
+                                <span id="fsTime" class="fs-time fs-only">00:00.0 / 00:00.0</span>
+                            </div>
+
+                            <button id="fullscreenBtn" class="video-btn" title="Pantalla Completa">
+                                <svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                    <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
-
-                    <button id="fullscreenBtn" class="video-btn" title="Pantalla Completa">
-                        <svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                            <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
-                        </svg>
-                    </button>
                 </div>
             </div>
         </div>

@@ -4,11 +4,16 @@
     padding: 0;
 }
 
+:root {
+    --page-pad: 60px;                                    /* Margen de la página */
+    --view-w: calc(100vw - 2 * var(--page-pad));         /* Ancho visible (main.js lo ajusta con exactitud) */
+}
+
 body {
     background-color: #000000;
     color: #ffffff;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    padding: 60px;
+    padding: var(--page-pad);
 }
 
 h1 {
@@ -76,6 +81,22 @@ h1 {
 /* Utilidad para ocultar elementos */
 .hidden {
     display: none !important;
+}
+
+/* La vista del proyecto ocupa todo el ancho desplazable (incluida la tabla estirada),
+   así la cabecera + vista previa pueden "seguirte" con position: sticky */
+#projectDetailView {
+    width: max-content;
+    min-width: 100%;
+}
+
+/* Cabecera + vista previa: se quedan pegadas al borde izquierdo de la ventana
+   cuando te desplazas en horizontal, con el mismo ancho que la ventana visible */
+.sticky-top {
+    position: sticky;
+    left: var(--page-pad);
+    width: var(--view-w);
+    z-index: 40;
 }
 
 /* Header del menú exclusivo del proyecto */
@@ -202,10 +223,23 @@ h1 {
     left: 8px;
     right: 8px;
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    flex-direction: column;
+    gap: 4px;
     pointer-events: none; /* Permite clicks solo en los botones internos */
     z-index: 10;
+    transition: opacity 0.25s, visibility 0.25s;
+}
+
+.controls-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.controls-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 
 .video-btn {
@@ -275,6 +309,119 @@ h1 {
 .video-player-container:fullscreen canvas {
     width: 100%;
     height: 100%;
+}
+
+/* --- Controles extra de pantalla completa (estilo YouTube) --- */
+
+/* Fuera de pantalla completa estos elementos no se muestran */
+.video-player-container:not(.is-fullscreen) .fs-only {
+    display: none;
+}
+
+/* Barra inferior con degradado para que se lea sobre cualquier video */
+.video-player-container.is-fullscreen .video-controls-overlay {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 36px 20px 16px;
+    gap: 6px;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0));
+}
+
+.video-player-container.is-fullscreen .video-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 1.1rem;
+}
+
+.fs-time {
+    color: #ffffff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.95rem;
+    pointer-events: none;
+}
+
+/* Barra para ir a un momento exacto */
+.fs-seek {
+    position: relative;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    pointer-events: auto;
+    touch-action: none;
+    user-select: none;
+}
+
+.fs-seek-track {
+    position: relative;
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.3);
+    transition: height 0.1s;
+}
+
+.fs-seek:hover .fs-seek-track,
+.fs-seek.dragging .fs-seek-track {
+    height: 7px;
+}
+
+.fs-seek-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    background: #ff4d4d;
+}
+
+.fs-seek-thumb {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
+    border-radius: 50%;
+    background: #ff4d4d;
+    transform: scale(0);
+    transition: transform 0.1s;
+}
+
+.fs-seek:hover .fs-seek-thumb,
+.fs-seek.dragging .fs-seek-thumb {
+    transform: scale(1);
+}
+
+/* Etiqueta con el tiempo exacto que aparece sobre el puntero */
+.fs-seek-tip {
+    position: absolute;
+    bottom: 24px;
+    left: 0;
+    transform: translateX(-50%);
+    padding: 2px 6px;
+    background: rgba(0, 0, 0, 0.9);
+    border: 1px solid #ffffff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+    display: none;
+}
+
+.fs-seek:hover .fs-seek-tip,
+.fs-seek.dragging .fs-seek-tip {
+    display: block;
+}
+
+/* Tras unos segundos sin mover el mouse (y reproduciendo) se ocultan los controles */
+.video-player-container.is-fullscreen.idle {
+    cursor: none;
+}
+
+.video-player-container.is-fullscreen.idle .video-controls-overlay {
+    opacity: 0;
+    visibility: hidden;
 }
 
 /* --- Sección de la línea de tiempo --- */
@@ -498,8 +645,19 @@ h1 {
     pointer-events: none;
 }
 
+.clip-badge {
+    white-space: nowrap;
+}
+
 .clip-badge:empty {
     display: none;
+}
+
+/* Clip bloqueado: se ve atenuado y con borde punteado */
+.clip.locked {
+    opacity: 0.65;
+    border-style: dashed;
+    cursor: not-allowed;
 }
 
 /* Menú contextual flotante */
@@ -529,6 +687,18 @@ h1 {
 
 .context-menu-item.checked::before {
     content: '✓ ';
+}
+
+/* Opciones no disponibles (por ejemplo, con el clip bloqueado) */
+.context-menu-item.disabled {
+    opacity: 0.35;
+    pointer-events: none;
+}
+
+.context-menu-separator {
+    height: 1px;
+    margin: 4px 0;
+    background-color: #444444;
 }
 
 .context-menu-item.danger {

@@ -50,6 +50,14 @@ const volumeBtn = document.getElementById('volumeBtn');
 const volumeSlider = document.getElementById('volumeSlider');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
 
+// Controles extra que solo se ven en pantalla completa
+const fsPlayBtn = document.getElementById('fsPlayBtn');
+const fsTime = document.getElementById('fsTime');
+const fsSeek = document.getElementById('fsSeek');
+const fsSeekFill = document.getElementById('fsSeekFill');
+const fsSeekThumb = document.getElementById('fsSeekThumb');
+const fsSeekTip = document.getElementById('fsSeekTip');
+
 // --- Estado ---
 let projects = {};
 let currentProjectId = null;
@@ -78,7 +86,12 @@ function serializeRows() {
         locked: row.classList.contains('locked'),
         clips: Array.from(row.children)
             .filter(el => el._clip)
-            .map(el => ({ id: el._clip.id, start: el._clip.start }))
+            .map(el => ({
+                id: el._clip.id,
+                start: el._clip.start,
+                muted: !!el._clip.muted,
+                locked: !!el._clip.locked
+            }))
     }));
 }
 
@@ -274,6 +287,8 @@ function buildRows(rowsData, project) {
             const clip = project.clips[c.id];
             if (!clip) return;
             clip.start = c.start;
+            clip.muted = !!c.muted;
+            clip.locked = !!c.locked;
             placeClip(row, clip);
         });
     });
@@ -386,11 +401,26 @@ function setupResizeHandlers(leftHandle, rightHandle) {
 // =====================================================================
 //  Ancho de la línea de tiempo y regla
 // =====================================================================
+let timelineWidthPx = 500; // Ancho actual de la tabla (el cabezal nunca pasa de aquí)
+
+// Segundo máximo al que puede llegar el cabezal = final de la tabla
+function timelineSeconds() {
+    return timelineWidthPx / PX_PER_SEC;
+}
+
 function setTimelineWidth(px) {
     px = Math.max(100, Math.round(px));
+    timelineWidthPx = px;
     rowsContainer.style.width = `${px}px`;
     ruler.style.width = `${px}px`;
     renderRuler(px);
+
+    // Si se acortó la tabla y el cabezal quedó afuera, lo trae hasta el nuevo final
+    if (clock.t > timelineSeconds()) {
+        clock.t = timelineSeconds();
+        if (clock.playing) clock.last = performance.now();
+        refreshPreview();
+    }
 }
 
 function renderRuler(px) {
@@ -538,6 +568,9 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 
 // --- Menú de clips ---
 const clipMenu = createMenu(`
+    <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
+    <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
+    <div class="context-menu-separator"></div>
     <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
     <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
     <div class="context-menu-item" data-chroma="none">No quitar fondo</div>
@@ -548,6 +581,17 @@ let clipTarget = null;
 
 function showClipContextMenu(x, y, clip) {
     clipTarget = clip;
+
+    const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
+    const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
+    muteItem.textContent = clip.muted ? 'Sonorizar' : 'Silenciar';
+    lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
+
+    // Con el clip bloqueado solo queda disponible "Desbloquear"
+    clipMenu.querySelectorAll('.context-menu-item').forEach(item => {
+        item.classList.toggle('disabled', !!clip.locked && item !== lockItem);
+    });
+
     clipMenu.querySelectorAll('[data-chroma]').forEach(item => {
         item.classList.toggle('checked', item.dataset.chroma === clip.chroma);
     });
@@ -556,10 +600,14 @@ function showClipContextMenu(x, y, clip) {
 
 clipMenu.addEventListener('click', (e) => {
     const item = e.target.closest('.context-menu-item');
-    if (!item || !clipTarget) return;
+    if (!item || !clipTarget || item.classList.contains('disabled')) return;
 
     if (item.dataset.chroma) {
         setClipChroma(clipTarget, item.dataset.chroma);
+    } else if (item.dataset.action === 'toggle-mute') {
+        setClipMuted(clipTarget, !clipTarget.muted);
+    } else if (item.dataset.action === 'toggle-lock') {
+        setClipLocked(clipTarget, !clipTarget.locked);
     } else if (item.dataset.action === 'delete') {
         deleteClip(clipTarget);
     }
@@ -658,6 +706,8 @@ function loadClip(file) {
                 start: 0,                // Segundo en que aparece en la línea de tiempo
                 chroma: 'none',          // 'none' | 'green' | 'blue'
                 chromaManual: false,
+                muted: false,            // Silenciado individualmente
+                locked: false,           // Bloqueado: no se puede configurar ni mover
                 el: null,
                 thumbs: null,
                 badge: null
@@ -723,20 +773,41 @@ function placeClip(row, clip) {
 
 function deleteClip(clip) {
     const row = clip.el.parentElement;
-    if (row && row.classList.contains('locked')) return;
+    if (clip.locked || (row && row.classList.contains('locked'))) return;
     clip.video.pause();
     clip.el.remove(); // El clip sigue guardado, así Ctrl+Z puede recuperarlo
     commit();
     refreshPreview();
 }
 
+// Actualiza la etiqueta de la esquina del clip y su aspecto de bloqueado
 function updateClipBadge(clip) {
-    clip.badge.textContent =
-        clip.chroma === 'green' ? 'Pantalla verde' :
-        clip.chroma === 'blue' ? 'Pantalla azul' : '';
+    const parts = [];
+    if (clip.chroma === 'green') parts.push('Pantalla verde');
+    if (clip.chroma === 'blue') parts.push('Pantalla azul');
+    if (clip.muted) parts.push('Silenciado');
+    if (clip.locked) parts.push('Bloqueado');
+
+    clip.badge.textContent = parts.join(' · ');
+    clip.el.classList.toggle('locked', !!clip.locked);
+}
+
+function setClipMuted(clip, muted) {
+    if (clip.locked) return; // Un clip bloqueado no se puede configurar
+    clip.muted = muted;
+    updateClipBadge(clip);
+    commit();
+    syncClips();
+}
+
+function setClipLocked(clip, locked) {
+    clip.locked = locked;
+    updateClipBadge(clip);
+    commit();
 }
 
 function setClipChroma(clip, mode) {
+    if (clip.locked) return; // Un clip bloqueado no se puede configurar
     clip.chroma = mode;
     clip.chromaManual = true; // Desactiva la detección automática
     updateClipBadge(clip);
@@ -750,15 +821,21 @@ function queueThumbnails(clip) {
     thumbQueue = thumbQueue.then(() => buildThumbnails(clip)).catch(() => {});
 }
 
-function waitFor(target, eventName, ms = 3000) {
+// --- Solución: Aumentar el tiempo de espera y manejar reintentos en el seek ---
+function waitFor(target, eventName, ms = 10000) {
     return new Promise((resolve) => {
+        let settled = false;
         const done = () => {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
             target.removeEventListener(eventName, done);
+            target.removeEventListener('error', done);
             resolve();
         };
         const timer = setTimeout(done, ms);
-        target.addEventListener(eventName, done);
+        target.addEventListener(eventName, done, { once: true });
+        target.addEventListener('error', done, { once: true });
     });
 }
 
@@ -785,7 +862,7 @@ async function buildThumbnails(clip) {
         ctx.drawImage(tv, i * tileW, 0, tileW, canvas.height);
 
         // Con el primer frame se detecta si el video tiene pantalla verde o azul
-        if (i === 0 && !clip.chromaManual) {
+        if (i === 0 && !clip.chromaManual && !clip.locked) {
             const mode = detectChromaBackground(tv);
             if (mode !== 'none') {
                 clip.chroma = mode;
@@ -876,7 +953,7 @@ function setupClipDrag(clip) {
     el.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
         const homeRow = el.parentElement;
-        if (!homeRow || homeRow.classList.contains('locked')) return;
+        if (!homeRow || homeRow.classList.contains('locked') || clip.locked) return;
 
         e.preventDefault();
         hideMenus();
@@ -1048,7 +1125,7 @@ function syncClips() {
             continue;
         }
 
-        const wantMuted = masterMuted || row.classList.contains('muted');
+        const wantMuted = masterMuted || clip.muted || row.classList.contains('muted');
         if (v.muted !== wantMuted) v.muted = wantMuted;
         if (v.volume !== masterVolume) v.volume = masterVolume;
 
@@ -1070,8 +1147,11 @@ function formatTime(t) {
 }
 
 function updatePlayhead() {
-    playhead.style.left = `${clock.t * PX_PER_SEC + 1}px`;
+    // La línea roja (2px de ancho) nunca se sale del borde derecho de la tabla
+    const x = Math.min(clock.t * PX_PER_SEC + 1, timelineWidthPx - 1);
+    playhead.style.left = `${x}px`;
     timeDisplay.textContent = `${formatTime(clock.t)} / ${formatTime(contentEnd())}`;
+    updateFullscreenUI();
 }
 
 function refreshPreview() {
@@ -1110,11 +1190,14 @@ function play() {
     clock.last = performance.now();
     syncClips();
     clock.raf = requestAnimationFrame(tick);
+    updateFullscreenUI();
+    showFsControls(); // Inicia el conteo para ocultar los controles en pantalla completa
 }
 
 function pause() {
     clock.playing = false;
     cancelAnimationFrame(clock.raf);
+    videoPlayerContainer.classList.remove('idle'); // En pausa los controles siempre se ven
     refreshPreview();
 }
 
@@ -1126,7 +1209,7 @@ function replay() {
 }
 
 function seek(t) {
-    clock.t = Math.max(0, t);
+    clock.t = Math.min(Math.max(0, t), timelineSeconds()); // Entre 0 y el final de la tabla
     if (clock.playing) clock.last = performance.now();
     refreshPreview();
 }
@@ -1160,7 +1243,7 @@ volumeBtn.addEventListener('click', () => {
 
 // --- Pantalla completa ---
 fullscreenBtn.addEventListener('click', () => {
-    if (!document.fullscreenElement) {
+    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
         if (videoPlayerContainer.requestFullscreen) {
             videoPlayerContainer.requestFullscreen();
         } else if (videoPlayerContainer.webkitRequestFullscreen) { /* Safari */
@@ -1170,8 +1253,122 @@ fullscreenBtn.addEventListener('click', () => {
         }
     } else if (document.exitFullscreen) {
         document.exitFullscreen();
+    } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
     }
 });
+
+// Marca el contenedor cuando entra / sale de pantalla completa (el CSS usa esta clase)
+function onFullscreenChange() {
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    videoPlayerContainer.classList.toggle('is-fullscreen', fsEl === videoPlayerContainer);
+    showFsControls();
+    updateFullscreenUI();
+}
+document.addEventListener('fullscreenchange', onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+
+// =====================================================================
+//  Controles de pantalla completa (estilo YouTube)
+//  - Botón play / pausa
+//  - Barra para ir a un momento exacto (click o arrastre)
+//  - Se ocultan solos tras 2,5 s sin mover el mouse (solo mientras se reproduce)
+// =====================================================================
+const FS_HIDE_MS = 2500;
+let scrubbing = false;
+let scrubResume = false;
+let idleTimer = 0;
+
+// Refresca barra de progreso, tiempo y el icono de play / pausa
+function updateFullscreenUI() {
+    const end = contentEnd();
+    const frac = end > 0 ? Math.min(1, clock.t / end) : 0;
+    fsSeekFill.style.width = `${frac * 100}%`;
+    fsSeekThumb.style.left = `${frac * 100}%`;
+    fsTime.textContent = `${formatTime(clock.t)} / ${formatTime(end)}`;
+    fsPlayBtn.textContent = clock.playing ? '❚❚' : '▶';
+}
+
+function showFsControls() {
+    videoPlayerContainer.classList.remove('idle');
+    clearTimeout(idleTimer);
+    if (!videoPlayerContainer.classList.contains('is-fullscreen')) return;
+
+    idleTimer = setTimeout(() => {
+        if (clock.playing && !scrubbing) videoPlayerContainer.classList.add('idle');
+    }, FS_HIDE_MS);
+}
+
+videoPlayerContainer.addEventListener('mousemove', showFsControls);
+videoPlayerContainer.addEventListener('pointerdown', showFsControls);
+
+fsPlayBtn.addEventListener('click', () => {
+    if (clock.playing) pause(); else play();
+});
+
+// Evita que los botones queden con el foco (si no, la barra espaciadora los "vuelve a pulsar")
+document.querySelectorAll('.video-btn').forEach(btn => {
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+});
+
+// Fracción (0..1) de la barra donde está el puntero
+function fsFracFromEvent(ev) {
+    const rect = fsSeek.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    return Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+}
+
+// Etiqueta con el tiempo exacto sobre el puntero
+function showSeekTip(ev) {
+    const rect = fsSeek.getBoundingClientRect();
+    const frac = fsFracFromEvent(ev);
+    fsSeekTip.textContent = formatTime(frac * contentEnd());
+    const half = fsSeekTip.offsetWidth / 2;
+    const x = Math.min(rect.width - half, Math.max(half, frac * rect.width));
+    fsSeekTip.style.left = `${x}px`;
+}
+
+fsSeek.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    fsSeek.setPointerCapture(e.pointerId);
+
+    scrubbing = true;
+    scrubResume = clock.playing;
+    if (scrubResume) pause();          // Se pausa mientras arrastras y luego continúa
+
+    fsSeek.classList.add('dragging');
+    seek(fsFracFromEvent(e) * contentEnd());
+    showSeekTip(e);
+});
+
+fsSeek.addEventListener('pointermove', (e) => {
+    showSeekTip(e);
+    if (scrubbing) seek(fsFracFromEvent(e) * contentEnd());
+});
+
+function endScrub() {
+    if (!scrubbing) return;
+    scrubbing = false;
+    fsSeek.classList.remove('dragging');
+    if (scrubResume && clock.t < contentEnd() - 0.05) play();
+    scrubResume = false;
+}
+fsSeek.addEventListener('pointerup', endScrub);
+fsSeek.addEventListener('pointercancel', endScrub);
+
+// =====================================================================
+//  La cabecera + vista previa siguen al usuario al desplazarse en horizontal
+//  (el CSS usa --view-w como ancho de la ventana visible)
+// =====================================================================
+function updateViewWidth() {
+    const cs = getComputedStyle(document.body);
+    const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    document.documentElement.style.setProperty('--view-w', `${document.documentElement.clientWidth - pad}px`);
+}
+window.addEventListener('resize', updateViewWidth);
+if (window.ResizeObserver) new ResizeObserver(updateViewWidth).observe(document.documentElement);
+updateViewWidth();
 
 // --- Inicio ---
 setTimelineWidth(500);
