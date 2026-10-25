@@ -48,11 +48,15 @@
                 </div>
 
                 <!-- VISTA PREVIA: aquí se componen todas las capas (canvas) -->
-                <div class="video-player-container" id="videoPlayerContainer">
-                    <canvas id="previewCanvas" width="640" height="360"></canvas>
+                        <!-- Reemplaza el inicio de .video-player-container en index.html con esto: -->
+                         <div class="video-player-container" id="videoPlayerContainer">
+                          <!-- Botón de tres puntos para abrir el menú de formato -->
+                        <button id="aspectMenuBtn" class="aspect-menu-btn" title="Elegir formato de pantalla">⋮</button>
 
-                    <!-- Overlay de controles inferiores del video -->
-                    <div class="video-controls-overlay">
+                       <canvas id="previewCanvas" width="640" height="360"></canvas>
+
+                        <!-- Overlay de controles inferiores del video -->
+                        <div class="video-controls-overlay">
                         <!-- Barra para ir a un momento exacto (solo en pantalla completa) -->
                         <div class="fs-seek fs-only" id="fsSeek" title="Ir a un momento exacto">
                             <div class="fs-seek-track">
@@ -117,7 +121,7 @@
             </div>
         </div>
     </div>
-     <!-- Añade esto antes de cerrar el <body> en index.html si deseas mostrar progreso de exportación -->
+    <!-- Añade esto antes de cerrar el <body> en index.html si deseas mostrar progreso de exportación -->
 <div id="exportModal" class="hidden" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.8); z-index:9999; display:flex; justify-content:center; align-items:center; flex-direction:column; color:white;">
     <h2>Exportando video...</h2>
     <p id="exportProgress">0%</p>
