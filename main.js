@@ -1052,15 +1052,15 @@ function hasUnreadyActiveClip() {
     return unready;
 }
 
+// Reemplaza la función render() por esta versión que soporta relaciones de aspecto dinámicas:
 function render() {
     renderQueued = false;
 
-    // Al exportar, si un video aún no está listo se conserva el último frame
-    // en vez de pintar negro (esto era lo que producía el parpadeo)
-    if (exporting && currentProjectId && hasUnreadyActiveClip()) return;
+    const canvasW = previewCanvas.width;
+    const canvasH = previewCanvas.height;
 
     pctx.fillStyle = '#000000';
-    pctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
+    pctx.fillRect(0, 0, canvasW, canvasH);
     if (!currentProjectId) return;
 
     forEachClipBottomUp((clip) => {
@@ -1070,17 +1070,17 @@ function render() {
         const v = clip.video;
         if (v.readyState < 2 || !v.videoWidth) return;
 
-        // Ajuste "contain" dentro de la vista previa
-        const s = Math.min(PREVIEW_W / v.videoWidth, PREVIEW_H / v.videoHeight);
+        // Ajuste "contain" proporcional a la nueva dimensión del canvas
+        const s = Math.min(canvasW / v.videoWidth, canvasH / v.videoHeight);
         const w = Math.max(1, Math.round(v.videoWidth * s));
         const h = Math.max(1, Math.round(v.videoHeight * s));
-        const x = Math.round((PREVIEW_W - w) / 2);
-        const y = Math.round((PREVIEW_H - h) / 2);
+        const x = Math.round((canvasW - w) / 2);
+        const y = Math.round((canvasH - h) / 2);
 
         if (clip.chroma === 'none') {
             pctx.drawImage(v, x, y, w, h);
         } else {
-            sctx.clearRect(0, 0, PREVIEW_W, PREVIEW_H);
+            sctx.clearRect(0, 0, canvasW, canvasH);
             sctx.drawImage(v, x, y, w, h);
             applyChromaKey(sctx, x, y, w, h, clip.chroma);
             pctx.drawImage(scratch, 0, 0);
@@ -1662,7 +1662,67 @@ exportBtn.addEventListener('click', async () => {
 
     if (ok) alert('¡Video exportado con éxito!');
 });
+// --- Control del Menú de Relación de Aspecto ---
+const aspectMenuBtn = document.getElementById('aspectMenuBtn');
+let currentAspectW = 16;
+let currentAspectH = 9;
 
+// Crear el menú usando el sistema global de menús flotantes
+const aspectMenu = createMenu(`
+    <div class="context-menu-item" style="font-weight:bold; border-bottom:1px solid #444; pointer-events:none; color: #cccccc;">Formato</div>
+    <div class="context-menu-item aspect-option checked" data-w="16" data-h="9">Horizontal 16:9</div>
+    <div class="context-menu-item aspect-option" data-w="1" data-h="1">Cuadrado 1:1</div>
+    <div class="context-menu-item aspect-option" data-w="9" data-h="16">Vertical 9:16</div>
+    <div class="context-menu-item aspect-option" data-w="4" data-h="3">Televisión 4:3</div>
+    <div class="context-menu-item aspect-option" data-w="21" data-h="9">Panorámico 21:9</div>
+    <div class="context-menu-item aspect-option" data-w="2" data-h="1">Cine intermedio 2.0:1</div>
+`);
+
+// Abrir menú al hacer clic en los tres puntos
+aspectMenuBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const rect = aspectMenuBtn.getBoundingClientRect();
+    openMenu(aspectMenu, rect.left, rect.bottom + 4);
+});
+
+// Selección de formato
+aspectMenu.addEventListener('click', (e) => {
+    const item = e.target.closest('.aspect-option');
+    if (!item) return;
+
+    const w = parseFloat(item.dataset.w);
+    const h = parseFloat(item.dataset.h);
+
+    currentAspectW = w;
+    currentAspectH = h;
+
+    // Marcar la opción activa
+    aspectMenu.querySelectorAll('.aspect-option').forEach(opt => opt.classList.remove('checked'));
+    item.classList.add('checked');
+
+    // Ajustar resolución interna del canvas (manteniendo la altura base de 360px)
+    const baseH = 360;
+    const newW = Math.round(baseH * (w / h));
+
+    previewCanvas.width = newW;
+    previewCanvas.height = baseH;
+
+    scratch.width = newW;
+    scratch.height = baseH;
+
+    // Ajustar proporciones del contenedor de previsualización
+    videoPlayerContainer.style.aspectRatio = `${w} / ${h}`;
+    if (w < h) { // Si es vertical (p. ej. 9:16)
+        videoPlayerContainer.style.height = '280px';
+        videoPlayerContainer.style.width = 'auto';
+    } else {
+        videoPlayerContainer.style.width = '320px';
+        videoPlayerContainer.style.height = 'auto';
+    }
+
+    requestRender();
+    hideMenus();
+});
 // --- Inicio ---
 setTimelineWidth(500);
 updatePlayhead();
