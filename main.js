@@ -73,6 +73,11 @@ let masterVolume = 1;
 let masterMuted = false;
 let renderQueued = false;
 
+// Exportación y audio (Web Audio permite mezclar el sonido de los clips dentro del archivo exportado)
+let exporting = false;     // true mientras se graba el video
+let audioCtx = null;       // Contexto de audio (se crea al exportar, dentro de un clic del usuario)
+let speakerGain = null;    // Salida a los parlantes (volumen general; en 0 mientras se exporta)
+
 // =====================================================================
 //  Sistema Undo / Redo
 // =====================================================================
@@ -141,7 +146,7 @@ function commit() {
 
 // Atajos de teclado
 document.addEventListener('keydown', (e) => {
-    if (!currentProjectId) return; // Solo actuar dentro de un proyecto
+    if (!currentProjectId || exporting) return; // Solo dentro de un proyecto (y no mientras se exporta)
 
     const key = e.key.toLowerCase();
     if ((e.ctrlKey || e.metaKey) && key === 'z') {
@@ -657,6 +662,7 @@ async function importVideoFile(file) {
     }
 
     currentProject().clips[clip.id] = clip;
+    if (audioCtx) ensureAudioGraph(); // Si el audio ya está activo, conecta también el clip nuevo
 
     // Fila vacía si hay; si no, se crea una nueva ARRIBA (queda por encima de las demás)
     const row = findEmptyRow() || createRowElement(true);
@@ -719,6 +725,8 @@ function loadClip(file) {
 }
 
 function disposeClip(clip) {
+    if (clip.gainNode) { try { clip.gainNode.disconnect(); } catch (e) {} }
+    if (clip.audioSource) { try { clip.audioSource.disconnect(); } catch (e) {} }
     clip.video.pause();
     clip.video.removeAttribute('src');
     clip.video.load();
@@ -1032,8 +1040,24 @@ function contentEnd() {
     return end;
 }
 
+// ¿Hay algún clip activo cuyo video todavía no tiene un frame listo? (está buscando / cargando)
+function hasUnreadyActiveClip() {
+    let unready = false;
+    forEachClipBottomUp((clip) => {
+        const local = clock.t - clip.start;
+        if (local < 0 || local >= clip.duration) return;
+        const v = clip.video;
+        if (v.seeking || v.readyState < 2 || !v.videoWidth) unready = true;
+    });
+    return unready;
+}
+
 function render() {
     renderQueued = false;
+
+    // Al exportar, si un video aún no está listo se conserva el último frame
+    // en vez de pintar negro (esto era lo que producía el parpadeo)
+    if (exporting && currentProjectId && hasUnreadyActiveClip()) return;
 
     pctx.fillStyle = '#000000';
     pctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
@@ -1106,6 +1130,10 @@ function applyChromaKey(ctx, x, y, w, h, mode) {
 function syncClips() {
     if (!currentProjectId) return;
 
+    // Volumen general: solo afecta a los parlantes, nunca a lo que se graba al exportar
+    if (speakerGain) speakerGain.gain.value = exporting ? 0 : (masterMuted ? 0 : masterVolume);
+    const tolerance = exporting ? 0.6 : DRIFT_TOLERANCE; // Al exportar se evitan saltos innecesarios
+
     for (const clip of Object.values(currentProject().clips)) {
         const v = clip.video;
 
@@ -1125,12 +1153,21 @@ function syncClips() {
             continue;
         }
 
-        const wantMuted = masterMuted || clip.muted || row.classList.contains('muted');
-        if (v.muted !== wantMuted) v.muted = wantMuted;
-        if (v.volume !== masterVolume) v.volume = masterVolume;
+        const silent = clip.muted || row.classList.contains('muted');
+        if (clip.gainNode) {
+            // Con el audio mezclado por Web Audio, el silencio se controla con la ganancia del clip
+            const g = silent ? 0 : 1;
+            if (clip.gainNode.gain.value !== g) clip.gainNode.gain.value = g;
+            if (v.muted) v.muted = false;
+            if (v.volume !== 1) v.volume = 1;
+        } else {
+            const wantMuted = masterMuted || silent;
+            if (v.muted !== wantMuted) v.muted = wantMuted;
+            if (v.volume !== masterVolume) v.volume = masterVolume;
+        }
 
         if (clock.playing) {
-            if (Math.abs(v.currentTime - local) > DRIFT_TOLERANCE) v.currentTime = local;
+            if (Math.abs(v.currentTime - local) > tolerance) v.currentTime = local;
             if (v.paused) v.play().catch(() => {});
         } else {
             if (!v.paused) v.pause();
@@ -1185,6 +1222,8 @@ function play() {
     if (end <= 0 || clock.playing) return;
 
     if (clock.t >= end - 0.01) clock.t = 0; // Si estaba al final, empieza de nuevo
+
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
     clock.playing = true;
     clock.last = performance.now();
@@ -1370,135 +1409,259 @@ window.addEventListener('resize', updateViewWidth);
 if (window.ResizeObserver) new ResizeObserver(updateViewWidth).observe(document.documentElement);
 updateViewWidth();
 // =====================================================================
-//  Sistema de Exportación a MP4 (Descarga instantánea al finalizar)
+//  Sistema de Exportación (video + audio)
+//  - Antes de grabar, deja todos los videos listos en el segundo 0 (sin parpadeo)
+//  - Mezcla el audio de los clips con Web Audio y lo graba junto con el video
+//  - Guarda con el formato real que produce el navegador (MP4 si puede, si no WebM)
 // =====================================================================
 
 const exportBtn = document.getElementById('exportBtn');
 const exportModal = document.getElementById('exportModal');
 const exportProgress = document.getElementById('exportProgress');
 
-exportBtn.addEventListener('click', async () => {
+// --- Audio -----------------------------------------------------------
+// Cada <video> pasa por un nodo de ganancia y de ahí a los parlantes.
+// Al exportar, esos mismos nodos se conectan además al destino que se graba.
+function ensureAudioGraph() {
     if (!currentProjectId) return;
+
+    if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        audioCtx = new Ctx();
+        speakerGain = audioCtx.createGain();
+        speakerGain.connect(audioCtx.destination);
+    }
+
+    for (const clip of Object.values(currentProject().clips)) {
+        if (clip.audioSource) continue; // createMediaElementSource solo se puede llamar una vez por <video>
+        try {
+            clip.audioSource = audioCtx.createMediaElementSource(clip.video);
+            clip.gainNode = audioCtx.createGain();
+            clip.audioSource.connect(clip.gainNode);
+            clip.gainNode.connect(speakerGain);
+        } catch (err) {
+            console.warn('No se pudo conectar el audio de', clip.name, err);
+        }
+    }
+}
+
+// --- Preparación de los videos ------------------------------------------
+// Espera a que un video termine de buscar (seek) y tenga un frame listo para dibujar
+function waitVideoReady(v, ms = 4000) {
+    return new Promise((resolve) => {
+        const ready = () => !v.seeking && v.readyState >= 2;
+        if (ready()) { resolve(); return; }
+
+        const finish = () => {
+            clearTimeout(timer);
+            v.removeEventListener('seeked', check);
+            v.removeEventListener('canplay', check);
+            resolve();
+        };
+        const check = () => { if (ready()) finish(); };
+        const timer = setTimeout(finish, ms); // Por si algún video nunca avisa
+
+        v.addEventListener('seeked', check);
+        v.addEventListener('canplay', check);
+    });
+}
+
+// Pone todos los videos en su primer frame y espera a que estén listos.
+// Sin esto, al empezar a grabar los videos "saltaban" al inicio y se veían frames negros.
+async function prepareClipsAtStart(project) {
+    clock.t = 0;
+
+    const clips = Object.values(project.clips).filter(c => c.el && c.el.isConnected);
+    clips.forEach(c => {
+        c.video.pause();
+        c.video.currentTime = 0;
+    });
+    await Promise.all(clips.map(c => waitVideoReady(c.video)));
+
+    render(); // Pinta el primer frame antes de empezar a grabar
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+}
+
+// --- Formato de salida ----------------------------------------------------
+function pickRecorderFormat() {
+    const options = [
+        { mime: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', type: 'video/mp4', ext: 'mp4' },
+        { mime: 'video/mp4;codecs=avc1,mp4a.40.2',        type: 'video/mp4', ext: 'mp4' },
+        { mime: 'video/mp4',                              type: 'video/mp4', ext: 'mp4' },
+        { mime: 'video/webm;codecs=vp9,opus',             type: 'video/webm', ext: 'webm' },
+        { mime: 'video/webm;codecs=vp8,opus',             type: 'video/webm', ext: 'webm' },
+        { mime: 'video/webm',                             type: 'video/webm', ext: 'webm' }
+    ];
+    return options.find(o => MediaRecorder.isTypeSupported(o.mime))
+        || { mime: '', type: 'video/webm', ext: 'webm' };
+}
+
+// --- Guardado --------------------------------------------------------------
+function downloadBlob(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }, 100);
+}
+
+async function saveBlob(blob, fileHandle, fileName) {
+    if (fileHandle) {
+        try {
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            return;
+        } catch (err) {
+            console.error('Error al guardar con File System Access API:', err);
+        }
+    }
+    downloadBlob(blob, fileName);
+}
+
+// --- Botón Exportar -----------------------------------------------------------
+exportBtn.addEventListener('click', async () => {
+    if (!currentProjectId || exporting) return;
+
+    const project = currentProject();
     const end = contentEnd();
     if (end <= 0) {
         alert('El proyecto está vacío o no tiene duración.');
         return;
     }
 
-    // 1. Abrir el explorador de archivos de inmediato para elegir nombre y ubicación (si el navegador lo soporta)
+    if (!window.MediaRecorder || !previewCanvas.captureStream) {
+        alert('Este navegador no permite exportar video. Usa una versión actual de Chrome o Edge.');
+        return;
+    }
+
+    // 1. El audio se prepara DENTRO del clic (gesto del usuario); si no, el navegador lo deja en silencio
+    ensureAudioGraph();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
+    const format = pickRecorderFormat();
+    const baseName = (project.name || 'video_editado').replace(/[\\/:*?"<>|]+/g, '_');
+    const fileName = `${baseName}.${format.ext}`;
+
+    // 2. Elegir nombre y ubicación (si el navegador lo soporta)
     let fileHandle = null;
     if (window.showSaveFilePicker) {
         try {
-            const options = {
-                suggestedName: `${currentProject().name || 'video_editado'}.mp4`,
+            fileHandle = await window.showSaveFilePicker({
+                suggestedName: fileName,
                 types: [{
-                    description: 'Video MP4',
-                    accept: { 'video/mp4': ['.mp4'] }
-                }],
-            };
-            fileHandle = await window.showSaveFilePicker(options);
+                    description: format.ext === 'mp4' ? 'Video MP4' : 'Video WebM',
+                    accept: { [format.type]: [`.${format.ext}`] }
+                }]
+            });
         } catch (err) {
-            if (err.name === 'AbortError') return; // Si el usuario cancela, no hacemos nada
+            if (err.name === 'AbortError') return; // El usuario canceló
         }
     }
 
-    // Mostrar modal de progreso mientras graba en tiempo real
-    if (exportModal) exportModal.classList.remove('hidden');
-    pause();
+    // 3. Mostrar el progreso y bloquear la edición mientras se graba
+    exporting = true;
+    exportProgress.textContent = 'Preparando...';
+    exportModal.classList.remove('hidden');
 
-    try {
-        // Capturamos directamente el stream del canvas de previsualización a 30 FPS
-        const stream = previewCanvas.captureStream(30);
+    let stream = null;
+    let recordDest = null;
 
-        // Detectar el mejor tipo MIME compatible para MP4 o WebM renombrado a MP4
-        let supportedType = 'video/mp4';
-        if (MediaRecorder.isTypeSupported('video/mp4')) {
-            supportedType = 'video/mp4';
-        } else if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9,opus')) {
-            supportedType = 'video/webm; codecs=vp9,opus';
-        } else {
-            supportedType = 'video/webm';
+    const cleanup = () => {
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        if (recordDest) {
+            Object.values(project.clips).forEach(c => {
+                if (c.gainNode) { try { c.gainNode.disconnect(recordDest); } catch (e) {} }
+            });
         }
+        exporting = false;
+        clock.playing = false;
+        cancelAnimationFrame(clock.raf);
+        clock.t = 0;
+        exportModal.classList.add('hidden');
+        if (currentProjectId) refreshPreview(); // Pausa los videos y devuelve el volumen a los parlantes
+    };
 
-        const mediaRecorder = new MediaRecorder(stream, { mimeType: supportedType });
+    let ok = false;
+    try {
+        pause();
+        await prepareClipsAtStart(project);
+        if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+
+        // 4. Flujo grabado = imagen del canvas + audio mezclado de todos los clips
+        const tracks = previewCanvas.captureStream(30).getVideoTracks();
+        if (audioCtx) {
+            recordDest = audioCtx.createMediaStreamDestination();
+            Object.values(project.clips).forEach(c => {
+                if (c.gainNode) c.gainNode.connect(recordDest);
+            });
+            tracks.push(...recordDest.stream.getAudioTracks());
+        }
+        stream = new MediaStream(tracks);
+
+        const recorderOptions = { videoBitsPerSecond: 8000000, audioBitsPerSecond: 192000 };
+        if (format.mime) recorderOptions.mimeType = format.mime;
+
+        const recorder = new MediaRecorder(stream, recorderOptions);
         const chunks = [];
-
-        mediaRecorder.ondataavailable = (e) => {
+        recorder.ondataavailable = (e) => {
             if (e.data && e.data.size > 0) chunks.push(e.data);
         };
+        const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
 
-        mediaRecorder.onstop = async () => {
-            // Forzar extensión .mp4 en el Blob
-            const blob = new Blob(chunks, { type: 'video/mp4' });
+        recorder.start(1000);
 
-            if (fileHandle) {
-                try {
-                    const writable = await fileHandle.createWritable();
-                    await writable.write(blob);
-                    await writable.close();
-                } catch (writeErr) {
-                    console.error('Error al guardar con File System Access API:', writeErr);
-                    fallbackDownloadMP4(blob);
-                }
-            } else {
-                fallbackDownloadMP4(blob);
-            }
-
-            if (exportModal) exportModal.classList.add('hidden');
-            alert('¡Video exportado con éxito!');
-        };
-
-        // Iniciar la grabación del stream
-        mediaRecorder.start();
-
-        // Reproducir el timeline desde el inicio para grabar de forma fluida
+        // 5. Reproducir la línea de tiempo en tiempo real mientras se graba
         clock.t = 0;
         clock.playing = true;
         clock.last = performance.now();
+        syncClips(); // Arranca los videos que empiezan en el segundo 0
 
-        const exportTick = (ts) => {
-            if (!clock.playing) return;
-            clock.t += Math.max(0, (ts - clock.last) / 1000);
-            clock.last = ts;
+        await new Promise((resolve) => {
+            const exportTick = (ts) => {
+                if (!clock.playing) { resolve(); return; }
 
-            if (exportProgress) {
-                const percent = Math.min(100, Math.round((clock.t / end) * 100));
-                exportProgress.textContent = `${percent}%`;
-            }
+                clock.t += Math.max(0, (ts - clock.last) / 1000);
+                clock.last = ts;
+                exportProgress.textContent = `${Math.min(100, Math.round((clock.t / end) * 100))}%`;
 
-            if (clock.t >= end) {
-                clock.playing = false;
-                mediaRecorder.stop(); // Al detenerse, se dispara la descarga instantánea
-                return;
-            }
+                if (clock.t >= end) {
+                    clock.playing = false;
+                    resolve();
+                    return;
+                }
 
-            syncClips();
-            render();
+                syncClips();
+                render();
+                requestAnimationFrame(exportTick);
+            };
             requestAnimationFrame(exportTick);
-        };
+        });
 
-        requestAnimationFrame(exportTick);
+        // Pequeño margen para que se grabe el final del audio (los videos van un poco por detrás del reloj)
+        await new Promise(r => setTimeout(r, 300));
+        recorder.stop();
+        await stopped;
 
+        const blob = new Blob(chunks, { type: (recorder.mimeType || format.type).split(';')[0] });
+        await saveBlob(blob, fileHandle, fileName);
+        ok = true;
     } catch (err) {
         console.error(err);
         alert('Hubo un error al exportar el video.');
-        if (exportModal) exportModal.classList.add('hidden');
+    } finally {
+        cleanup();
     }
-});
 
-function fallbackDownloadMP4(blob) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.style.display = 'none';
-    a.href = url;
-    a.download = `${currentProject().name || 'video_editado'}.mp4`;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-    }, 100);
-}
+    if (ok) alert('¡Video exportado con éxito!');
+});
 
 // --- Inicio ---
 setTimelineWidth(500);
