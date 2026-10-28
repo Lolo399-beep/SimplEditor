@@ -579,6 +579,7 @@ const clipMenu = createMenu(`
     <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
     <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
     <div class="context-menu-item" data-chroma="none">No quitar fondo</div>
+    <div class="context-menu-item" data-action="rethumb">Recargar fotogramas</div>
     <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
 `);
 
@@ -613,6 +614,8 @@ clipMenu.addEventListener('click', (e) => {
         setClipMuted(clipTarget, !clipTarget.muted);
     } else if (item.dataset.action === 'toggle-lock') {
         setClipLocked(clipTarget, !clipTarget.locked);
+    } else if (item.dataset.action === 'rethumb') {
+        queueThumbnails(clipTarget);
     } else if (item.dataset.action === 'delete') {
         deleteClip(clipTarget);
     }
@@ -716,6 +719,9 @@ function loadClip(file) {
                 locked: false,           // Bloqueado: no se puede configurar ni mover
                 el: null,
                 thumbs: null,
+                thumbCtx: null,
+                thumbBusy: false,        // Generando (o en cola para generar) sus miniaturas
+                disposed: false,         // true cuando se libera el clip (detiene las miniaturas)
                 badge: null
             });
         }, { once: true });
@@ -725,6 +731,7 @@ function loadClip(file) {
 }
 
 function disposeClip(clip) {
+    clip.disposed = true; // Corta la generación de miniaturas en curso
     if (clip.gainNode) { try { clip.gainNode.disconnect(); } catch (e) {} }
     if (clip.audioSource) { try { clip.audioSource.disconnect(); } catch (e) {} }
     clip.video.pause();
@@ -745,10 +752,11 @@ function createClipElement(clip) {
     const thumbs = document.createElement('canvas');
     thumbs.width = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
     thumbs.height = THUMB_H;
-    const tctx = thumbs.getContext('2d');
+    const tctx = thumbs.getContext('2d', { alpha: false });
     tctx.fillStyle = '#1a1a1a';
     tctx.fillRect(0, 0, thumbs.width, thumbs.height);
     clip.thumbs = thumbs;
+    clip.thumbCtx = tctx;
 
     const label = document.createElement('span');
     label.className = 'clip-label';
@@ -822,66 +830,229 @@ function setClipChroma(clip, mode) {
     requestRender();
 }
 
-// --- Miniaturas (se generan de a un video a la vez) ---
+// --- Miniaturas (fotogramas de la tira de cada clip) ---------------------
+// Pensado para PCs con poca RAM / CPU lenta y videos HD largos:
+//  - Solo hay UN decodificador extra a la vez, sin precarga, y se cierra al terminar
+//    (también se cierra mientras el usuario reproduce o exporta, para no quitarle recursos)
+//  - Cada salto tiene tiempo de espera y reintentos; si el decodificador se traba, se abre otro
+//  - Se dibuja de grueso a fino (cada 8ª miniatura, luego 4ª, 2ª y todas): la tira se ve
+//    completa desde el principio y se va afinando, así nunca queda en gris
+//  - Lo que aún no se pudo capturar se rellena con la miniatura real más cercana
+//  - Si al final faltan miniaturas se hacen hasta THUMB_ROUNDS vueltas más para completarlas
+const THUMB_SEEK_TIMEOUT = 10000;  // ms que se espera un salto (se multiplica en cada reintento)
+const THUMB_TRIES = 3;             // Intentos por miniatura antes de darla por fallida
+const THUMB_ROUNDS = 3;            // Vueltas completas para completar las que falten
+const THUMB_MAX_FAILS = 3;         // Fallos seguidos antes de pasar a la siguiente vuelta
+const THUMB_MAX_REOPENS = 12;      // Veces máximas que se vuelve a abrir el decodificador por clip
+
 let thumbQueue = Promise.resolve();
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 function queueThumbnails(clip) {
-    thumbQueue = thumbQueue.then(() => buildThumbnails(clip)).catch(() => {});
+    if (clip.thumbBusy) return; // Ya se está generando (o está esperando su turno)
+    clip.thumbBusy = true;
+    thumbQueue = thumbQueue
+        .then(() => buildThumbnails(clip))
+        .catch((err) => console.warn('No se pudieron generar las miniaturas de', clip.name, err))
+        .finally(() => { clip.thumbBusy = false; });
 }
 
-// --- Solución: Aumentar el tiempo de espera y manejar reintentos en el seek ---
-function waitFor(target, eventName, ms = 10000) {
+// Abre un <video> aparte, sin sonido y sin precarga, solo para sacar fotogramas
+function openThumbVideo(url) {
     return new Promise((resolve) => {
-        let settled = false;
-        const done = () => {
-            if (settled) return;
-            settled = true;
+        const v = document.createElement('video');
+        v.muted = true;
+        v.preload = 'metadata';          // No guarda en memoria lo que no necesita
+        v.playsInline = true;
+        v.disablePictureInPicture = true;
+
+        let done = false;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
             clearTimeout(timer);
-            target.removeEventListener(eventName, done);
-            target.removeEventListener('error', done);
-            resolve();
+            v.removeEventListener('loadedmetadata', onMeta);
+            v.removeEventListener('error', onError);
+            if (ok) {
+                resolve(v);
+            } else {
+                closeThumbVideo(v);
+                resolve(null);
+            }
         };
-        const timer = setTimeout(done, ms);
-        target.addEventListener(eventName, done, { once: true });
-        target.addEventListener('error', done, { once: true });
+        const onMeta = () => finish(!!v.videoWidth);
+        const onError = () => finish(false);
+        const timer = setTimeout(() => finish(false), 15000);
+
+        v.addEventListener('loadedmetadata', onMeta);
+        v.addEventListener('error', onError);
+        v.src = url;
     });
 }
 
+// Libera el decodificador y la memoria del <video> auxiliar
+function closeThumbVideo(v) {
+    if (!v) return;
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+}
+
+// Salta a un segundo y espera a que ese fotograma esté realmente listo para dibujarse
+function seekVideo(v, t, ms) {
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            v.removeEventListener('seeked', check);
+            v.removeEventListener('canplay', check);
+            v.removeEventListener('loadeddata', check);
+            v.removeEventListener('error', onError);
+            resolve(ok);
+        };
+        const ready = () => !v.seeking && v.readyState >= 2;
+        const check = () => { if (ready()) finish(true); };
+        const onError = () => finish(false);
+        const timer = setTimeout(() => finish(ready()), ms);
+
+        v.addEventListener('seeked', check);
+        v.addEventListener('canplay', check);
+        v.addEventListener('loadeddata', check);
+        v.addEventListener('error', onError);
+
+        if (Math.abs(v.currentTime - t) < 0.001) t += 0.02; // Si ya está ahí, 'seeked' podría no avisar
+        v.currentTime = t;
+    });
+}
+
+// Captura el fotograma de un segundo, con varios intentos (cada uno espera más que el anterior)
+async function captureFrame(v, t, clip) {
+    for (let attempt = 0; attempt < THUMB_TRIES; attempt++) {
+        if (v.error || clip.disposed) return false;
+        const target = Math.max(0.01, Math.min(clip.duration - 0.05, t + attempt * 0.3));
+        if (await seekVideo(v, target, THUMB_SEEK_TIMEOUT * (attempt + 1))) return true;
+    }
+    return false;
+}
+
+// La generación espera mientras se reproduce o se exporta
+async function waitUntilIdle(clip) {
+    while ((clock.playing || exporting) && !clip.disposed) await sleep(300);
+}
+
 async function buildThumbnails(clip) {
-    // Se usa un video aparte para no interferir con la reproducción
-    const tv = document.createElement('video');
-    tv.muted = true;
-    tv.preload = 'auto';
-    tv.src = clip.url;
-    await waitFor(tv, 'loadeddata');
+    if (clip.disposed) return;
 
     const canvas = clip.thumbs;
-    const ctx = canvas.getContext('2d');
-    const tileW = Math.max(16, Math.round(canvas.height * clip.aspect));
-    const tiles = Math.ceil(canvas.width / tileW);
+    const ctx = clip.thumbCtx || canvas.getContext('2d');
+    const H = canvas.height;
 
-    for (let i = 0; i < tiles; i++) {
-        if (tv.readyState < 2) break;
+    // Medidas "en pantalla": cada miniatura respeta la proporción del video. Si el clip es tan largo
+    // que el canvas quedó limitado a MAX_THUMB_W, se dibuja comprimido (k < 1) y el navegador
+    // lo estira de vuelta, así que no se deforma ni se pierde ninguna parte del clip.
+    const screenW = clip.duration * PX_PER_SEC;
+    const tileW = Math.max(16, Math.round(H * clip.aspect));
+    const tiles = Math.max(1, Math.ceil(screenW / tileW));
+    const k = canvas.width / screenW;
 
-        const frac = Math.min(0.999, (i * tileW + tileW / 2) / canvas.width);
-        tv.currentTime = Math.max(0.01, Math.min(clip.duration - 0.05, frac * clip.duration));
-        await waitFor(tv, 'seeked');
+    const tileRect = (i) => {
+        const x0 = Math.round(i * tileW * k);
+        return { x: x0, w: Math.max(1, Math.round((i + 1) * tileW * k) - x0) };
+    };
+    const tileTime = (i) => {
+        const frac = Math.min(0.999, (i * tileW + tileW / 2) / screenW);
+        return Math.max(0.01, Math.min(clip.duration - 0.05, frac * clip.duration));
+    };
 
-        ctx.drawImage(tv, i * tileW, 0, tileW, canvas.height);
-
-        // Con el primer frame se detecta si el video tiene pantalla verde o azul
-        if (i === 0 && !clip.chromaManual && !clip.locked) {
-            const mode = detectChromaBackground(tv);
-            if (mode !== 'none') {
-                clip.chroma = mode;
-                updateClipBadge(clip);
-                requestRender();
-            }
+    // Orden de trabajo: de grueso a fino
+    const passes = [];
+    const seen = new Uint8Array(tiles);
+    for (const stride of [8, 4, 2, 1]) {
+        const pass = [];
+        for (let i = 0; i < tiles; i += stride) {
+            if (!seen[i]) { seen[i] = 1; pass.push(i); }
         }
+        passes.push(pass);
     }
 
-    tv.removeAttribute('src');
-    tv.load();
+    const real = new Uint8Array(tiles); // 1 = fotograma real ya dibujado
+
+    // Rellena las miniaturas pendientes copiando la real más cercana hacia la izquierda
+    const fillGaps = () => {
+        let src = real.indexOf(1);
+        if (src < 0) return;
+        for (let i = 0; i < tiles; i++) {
+            if (real[i]) { src = i; continue; }
+            const s = tileRect(src);
+            const d = tileRect(i);
+            ctx.drawImage(canvas, s.x, 0, s.w, H, d.x, 0, d.w, H);
+        }
+    };
+
+    let tv = null;
+    let retries = 0;
+    const openVideo = async (isRetry) => {
+        closeThumbVideo(tv);
+        tv = null;
+        if (isRetry && ++retries > THUMB_MAX_REOPENS) return false;
+        tv = await openThumbVideo(clip.url);
+        return !!tv;
+    };
+
+    try {
+        for (let round = 0; round < THUMB_ROUNDS && !clip.disposed; round++) {
+            if (real.indexOf(0) < 0) break;                      // Ya están todas
+            if (round > 0) await sleep(2000 * round);            // Respira antes de reintentar
+            if (!(await openVideo(round > 0))) continue;
+
+            let fails = 0;
+            outer:
+            for (const pass of passes) {
+                for (const i of pass) {
+                    if (real[i]) continue;
+                    if (clip.disposed) return;
+
+                    // Mientras el usuario reproduce o exporta, se libera el decodificador y se espera
+                    if (clock.playing || exporting) {
+                        closeThumbVideo(tv);
+                        tv = null;
+                        await waitUntilIdle(clip);
+                        if (clip.disposed) return;
+                        if (!(await openVideo(false))) break outer;
+                    }
+
+                    if (await captureFrame(tv, tileTime(i), clip)) {
+                        const r = tileRect(i);
+                        ctx.drawImage(tv, r.x, 0, r.w, H);
+                        real[i] = 1;
+                        fails = 0;
+
+                        // Con el primer fotograma se detecta si el video tiene pantalla verde o azul
+                        if (i === 0 && !clip.chromaManual && !clip.locked) {
+                            const mode = detectChromaBackground(tv);
+                            if (mode !== 'none') {
+                                clip.chroma = mode;
+                                updateClipBadge(clip);
+                                requestRender();
+                            }
+                        }
+                    } else {
+                        // El decodificador quedó trabado: se descarta y se abre uno nuevo
+                        if (++fails >= THUMB_MAX_FAILS) break outer;
+                        if (!(await openVideo(true))) break outer;
+                    }
+                }
+                fillGaps(); // Al terminar cada pasada la tira ya se ve completa
+            }
+            fillGaps();     // También si la vuelta se cortó por fallos seguidos
+        }
+    } finally {
+        fillGaps();
+        closeThumbVideo(tv);
+    }
 }
 
 // Mira el borde del frame: si es mayormente verde o azul intenso, es una pantalla de chroma
