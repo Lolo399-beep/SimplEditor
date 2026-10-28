@@ -57,6 +57,9 @@ const fsSeek = document.getElementById('fsSeek');
 const fsSeekFill = document.getElementById('fsSeekFill');
 const fsSeekThumb = document.getElementById('fsSeekThumb');
 const fsSeekTip = document.getElementById('fsSeekTip');
+const fsSeekCanvas = document.getElementById('fsSeekCanvas');
+const fsSeekCtx = fsSeekCanvas ? fsSeekCanvas.getContext('2d') : null;
+const fsSeekTipTime = document.getElementById('fsSeekTipTime');
 
 // --- Estado ---
 let projects = {};
@@ -1532,7 +1535,11 @@ function fsFracFromEvent(ev) {
 function showSeekTip(ev) {
     const rect = fsSeek.getBoundingClientRect();
     const frac = fsFracFromEvent(ev);
-    fsSeekTip.textContent = formatTime(frac * contentEnd());
+    const targetT = frac * contentEnd();
+    
+    if (fsSeekTipTime) fsSeekTipTime.textContent = formatTime(targetT);
+    renderPreviewAtTime(targetT);
+
     const half = fsSeekTip.offsetWidth / 2;
     const x = Math.min(rect.width - half, Math.max(half, frac * rect.width));
     fsSeekTip.style.left = `${x}px`;
@@ -1894,6 +1901,40 @@ aspectMenu.addEventListener('click', (e) => {
     requestRender();
     hideMenus();
 });
+function renderPreviewAtTime(targetT) {
+    if (!fsSeekCtx || !currentProjectId) return;
+
+    const canvasW = fsSeekCanvas.width;
+    const canvasH = fsSeekCanvas.height;
+
+    fsSeekCtx.fillStyle = '#000000';
+    fsSeekCtx.fillRect(0, 0, canvasW, canvasH);
+
+    const rows = Array.from(rowsContainer.children);
+    for (let i = rows.length - 1; i >= 0; i--) {
+        for (const el of rows[i].children) {
+            if (el._clip) {
+                const clip = el._clip;
+                const local = targetT - clip.start;
+                if (local >= 0 && local < clip.duration && clip.thumbs) {
+                    const aspect = clip.aspect || (16 / 9);
+                    const frameW = clip.thumbs.height * aspect;
+                    const thumbX = (local / clip.duration) * Math.max(0, clip.thumbs.width - frameW);
+
+                    try {
+                        fsSeekCtx.drawImage(
+                            clip.thumbs,
+                            Math.max(0, thumbX), 0, Math.min(frameW, clip.thumbs.width - Math.max(0, thumbX)), clip.thumbs.height,
+                            0, 0, canvasW, canvasH
+                        );
+                    } catch (e) {
+                        // Fallback silencioso si ocurre algún desajuste de límites
+                    }
+                }
+            }
+        }
+    }
+}
 // --- Inicio ---
 setTimelineWidth(500);
 updatePlayhead();
