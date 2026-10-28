@@ -59,13 +59,15 @@
                         <div class="video-controls-overlay">
                         <!-- Barra para ir a un momento exacto (solo en pantalla completa) -->
                         <div class="fs-seek fs-only" id="fsSeek" title="Ir a un momento exacto">
-                            <div class="fs-seek-track">
-                                <div class="fs-seek-fill" id="fsSeekFill"></div>
-                                <div class="fs-seek-thumb" id="fsSeekThumb"></div>
-                            </div>
-                            <div class="fs-seek-tip" id="fsSeekTip">00:00.0</div>
+                             <div class="fs-seek-track">
+                             <div class="fs-seek-fill" id="fsSeekFill"></div>
+                            <div class="fs-seek-thumb" id="fsSeekThumb"></div>
                         </div>
-
+    <div class="fs-seek-tip" id="fsSeekTip">
+        <canvas id="fsSeekCanvas" width="160" height="90"></canvas>
+        <div id="fsSeekTipTime" class="fs-seek-tip-time">00:00.0</div>
+    </div>
+</div>
                         <div class="controls-row">
                             <div class="controls-left">
                                 <!-- Play / pausa (solo en pantalla completa) -->
@@ -130,3 +132,5 @@
     <script src="main.js"></script>
 </body>
 </html>
+
+<!-- Funciona? -->
