@@ -841,3 +841,41 @@ h1 {
 .video-player-container.is-fullscreen .aspect-ratio-dropdown {
     display: none !important;
 }
+/* Etiqueta con la miniatura y el tiempo exacto estilo YouTube */
+.fs-seek-tip {
+    position: absolute;
+    bottom: 24px;
+    left: 0;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.95);
+    border: 1px solid #ffffff;
+    border-radius: 4px;
+    padding: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    z-index: 25;
+}
+
+.fs-seek-tip canvas {
+    width: 160px;
+    height: 90px;
+    background: #000000;
+    display: block;
+    object-fit: contain;
+}
+
+.fs-seek-tip-time {
+    color: #ffffff;
+    font-size: 11px;
+}
+
+.fs-seek:hover .fs-seek-tip,
+.fs-seek.dragging .fs-seek-tip {
+    display: flex;
+}
