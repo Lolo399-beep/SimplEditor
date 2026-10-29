@@ -940,3 +940,21 @@ body.trim-mode .row-handle {
 body.trim-mode .ruler {
     cursor: not-allowed;    /* No se mueve el cabezal desde la regla */
 }
+
+
+/* Clips de imagen en la línea de tiempo */
+.clip.image-clip {
+    background-color: #202020;
+    border-color: #8ad7ff;
+}
+.clip.image-clip canvas {
+    object-fit: fill;
+}
+.clip.image-clip .clip-badge { color: #8ad7ff; }
+
+.clip.image-clip { overflow: visible; }
+.image-resize-handle {
+    position: absolute; top: 0; right: -3px; bottom: 0; width: 7px;
+    z-index: 12; cursor: ew-resize; background: rgba(138, 215, 255, .45);
+}
+.image-resize-handle:hover { background: #8ad7ff; }
