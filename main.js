@@ -1970,13 +1970,326 @@ async function saveBlob(blob, fileHandle, fileName) {
     downloadBlob(blob, fileName);
 }
 
+// =====================================================================
+//  MP4 fragmentado (Chrome) -> MP4 normal con la duración exacta
+//  El MediaRecorder de Chrome guarda el MP4 "en trozos" (fragmentado) y SIN la duración
+//  en el encabezado. Muchos reproductores / editores entonces muestran una duración
+//  equivocada (o solo la del primer trozo, de unos pocos segundos) y no dejan avanzar.
+//  Esta función NO vuelve a codificar nada: lee la tabla de muestras de cada trozo y escribe
+//  un MP4 normal (moov al inicio) con la duración correcta. Los datos de video y audio se
+//  reutilizan tal cual (Blob.slice), así que casi no gasta memoria. Si algo falla, el
+//  llamador guarda el archivo original sin tocarlo.
+// =====================================================================
+async function fragmentedMp4ToMp4(blob) {
+    const ascii = (s) => Uint8Array.from(s, c => c.charCodeAt(0));
+    const fourcc = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+    const readBytes = async (start, len) => new Uint8Array(await blob.slice(start, start + len).arrayBuffer());
+
+    // Lista los "boxes" de un buffer entre start y end
+    const parseBoxes = (buf, start, end) => {
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        const list = [];
+        let p = start;
+        while (p + 8 <= end) {
+            let size = dv.getUint32(p);
+            let hdr = 8;
+            if (size === 1) {
+                if (p + 16 > end) break;
+                size = Number(dv.getBigUint64(p + 8));
+                hdr = 16;
+            } else if (size === 0) {
+                size = end - p;
+            }
+            if (size < hdr || p + size > end) break;
+            list.push({ type: fourcc(buf, p + 4), start: p, end: p + size, hdr });
+            p += size;
+        }
+        return list;
+    };
+    const kids = (buf, box, type) =>
+        parseBoxes(buf, box.start + box.hdr, box.end).filter(b => !type || b.type === type);
+
+    // --- 1. Leer el archivo: solo se cargan moov y los moof (son pequeños), nunca los datos ---
+    const total = blob.size;
+    let moov = null;
+    const moofs = [];
+    for (let pos = 0; pos + 8 <= total;) {
+        const head = await readBytes(pos, 16);
+        const hv = new DataView(head.buffer);
+        let size = hv.getUint32(0);
+        let hdr = 8;
+        const type = fourcc(head, 4);
+        if (size === 1 && head.length >= 16) { size = Number(hv.getBigUint64(8)); hdr = 16; }
+        else if (size === 0) size = total - pos;
+        if (size < hdr || pos + size > total) break;
+        if (type === 'moov') moov = await readBytes(pos, size);
+        else if (type === 'moof') moofs.push({ start: pos, buf: await readBytes(pos, size) });
+        pos += size;
+    }
+    if (!moov || !moofs.length) return blob; // No está fragmentado: no hay nada que arreglar
+
+    const mdv = new DataView(moov.buffer, moov.byteOffset, moov.byteLength);
+    const moovBox = parseBoxes(moov, 0, moov.length)[0];
+    const mvhd = kids(moov, moovBox, 'mvhd')[0];
+    const mvhdV = moov[mvhd.start + mvhd.hdr];
+    const movTs = mdv.getUint32(mvhd.start + mvhd.hdr + (mvhdV === 1 ? 20 : 12));
+
+    // Valores por defecto de cada pista (trex)
+    const trex = {};
+    const mvex = kids(moov, moovBox, 'mvex')[0];
+    if (mvex) {
+        for (const b of kids(moov, mvex, 'trex')) {
+            const o = b.start + b.hdr;
+            trex[mdv.getUint32(o + 4)] = { dur: mdv.getUint32(o + 12), size: mdv.getUint32(o + 16), flags: mdv.getUint32(o + 20) };
+        }
+    }
+
+    // Pistas (video, audio)
+    const tracks = {};
+    for (const trak of kids(moov, moovBox, 'trak')) {
+        const tkhd = kids(moov, trak, 'tkhd')[0];
+        const mdia = kids(moov, trak, 'mdia')[0];
+        const mdhd = kids(moov, mdia, 'mdhd')[0];
+        const hdlr = kids(moov, mdia, 'hdlr')[0];
+        const minf = kids(moov, mdia, 'minf')[0];
+        const stbl = kids(moov, minf, 'stbl')[0];
+        const stsd = kids(moov, stbl, 'stsd')[0];
+        const tv = moov[tkhd.start + tkhd.hdr];
+        const mv = moov[mdhd.start + mdhd.hdr];
+        const id = mdv.getUint32(tkhd.start + tkhd.hdr + (tv === 1 ? 20 : 12));
+        tracks[id] = {
+            id, trak, tkhd, mdia, mdhd, minf, stsd, tv, mv,
+            timescale: mdv.getUint32(mdhd.start + mdhd.hdr + (mv === 1 ? 20 : 12)),
+            handler: fourcc(moov, hdlr.start + hdlr.hdr + 8),
+            dur: [], size: [], sync: [], cto: [], chunks: [],
+            hasCto: false, negCto: false, startTime: null, cum: 0
+        };
+    }
+
+    // --- 2. Leer las tablas de muestras de cada trozo (moof -> traf -> trun) ---
+    const allChunks = []; // En el orden en que aparecen en el archivo original
+    for (const mf of moofs) {
+        const buf = mf.buf;
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        const moofBox = parseBoxes(buf, 0, buf.length)[0];
+        if (!moofBox) continue;
+
+        for (const traf of kids(buf, moofBox, 'traf')) {
+            const tfhd = kids(buf, traf, 'tfhd')[0];
+            if (!tfhd) continue;
+            let o = tfhd.start + tfhd.hdr;
+            const tfFlags = dv.getUint32(o) & 0xFFFFFF;
+            const t = tracks[dv.getUint32(o + 4)];
+            o += 8;
+            if (!t) continue;
+
+            let base = mf.start; // Sin base explícita, los desplazamientos cuentan desde el inicio del moof
+            if (tfFlags & 0x01) { base = Number(dv.getBigUint64(o)); o += 8; }
+            if (tfFlags & 0x02) o += 4;
+            const def = Object.assign({ dur: 0, size: 0, flags: 0 }, trex[t.id]);
+            if (tfFlags & 0x08) { def.dur = dv.getUint32(o); o += 4; }
+            if (tfFlags & 0x10) { def.size = dv.getUint32(o); o += 4; }
+            if (tfFlags & 0x20) { def.flags = dv.getUint32(o); o += 4; }
+
+            // Hora de inicio del trozo: la duración de la última muestra del trozo anterior no siempre
+            // es exacta (el grabador no conoce la siguiente hora todavía), así que se ajusta para que
+            // empalme justo con este trozo. Así audio y video nunca se desfasan.
+            const tfdt = kids(buf, traf, 'tfdt')[0];
+            if (tfdt) {
+                const to = tfdt.start + tfdt.hdr;
+                const bt = buf[to] === 1 ? Number(dv.getBigUint64(to + 4)) : dv.getUint32(to + 4);
+                if (t.startTime === null) {
+                    t.startTime = bt;
+                } else if (t.dur.length) {
+                    const delta = bt - (t.startTime + t.cum);
+                    const fixedLast = t.dur[t.dur.length - 1] + delta;
+                    if (delta !== 0 && fixedLast > 0) { t.dur[t.dur.length - 1] = fixedLast; t.cum += delta; }
+                }
+            }
+            if (t.startTime === null) t.startTime = 0;
+
+            let next = base;
+            for (const trun of kids(buf, traf, 'trun')) {
+                let p = trun.start + trun.hdr;
+                const ver = buf[p];
+                const fl = dv.getUint32(p) & 0xFFFFFF;
+                const count = dv.getUint32(p + 4);
+                p += 8;
+
+                let dataOff = next;
+                if (fl & 0x01) { dataOff = base + dv.getInt32(p); p += 4; }
+                let firstFlags = null;
+                if (fl & 0x04) { firstFlags = dv.getUint32(p); p += 4; }
+
+                let runSize = 0;
+                for (let i = 0; i < count; i++) {
+                    let d = def.dur, s = def.size, f = (i === 0 && firstFlags !== null) ? firstFlags : def.flags, c = 0;
+                    if (fl & 0x100) { d = dv.getUint32(p); p += 4; }
+                    if (fl & 0x200) { s = dv.getUint32(p); p += 4; }
+                    if (fl & 0x400) { f = dv.getUint32(p); p += 4; }
+                    if (fl & 0x800) { c = ver === 1 ? dv.getInt32(p) : dv.getUint32(p); p += 4; }
+
+                    t.dur.push(d);
+                    t.size.push(s);
+                    t.cto.push(c);
+                    if (c) t.hasCto = true;
+                    if (c < 0) t.negCto = true;
+                    if (!(f & 0x10000)) t.sync.push(t.dur.length); // Fotograma clave (número de muestra, desde 1)
+                    t.cum += d;
+                    runSize += s;
+                }
+                const chunk = { t, src: dataOff, size: runSize, count, dst: 0 };
+                if (chunk.src + chunk.size > total) throw new Error('El archivo grabado está incompleto');
+                t.chunks.push(chunk);
+                allChunks.push(chunk);
+                next = dataOff + runSize;
+            }
+        }
+    }
+
+    const outTracks = Object.values(tracks).filter(t => t.dur.length);
+    if (!outTracks.length) return blob;
+
+    // --- 3. Duraciones (la del archivo = la de la pista más larga) ---
+    const startSec = (t) => t.startTime / t.timescale;
+    const minStart = Math.min(...outTracks.map(startSec));
+    for (const t of outTracks) {
+        t.mediaDur = t.cum; // En la escala de tiempo de la pista
+        t.delay = Math.round((startSec(t) - minStart) * movTs); // Si una pista empieza más tarde (en la escala del archivo)
+        if (t.delay * 1000 / movTs < 1) t.delay = 0;
+        t.trackDur = t.delay + Math.round(t.mediaDur * movTs / t.timescale);
+    }
+    const movieDur = Math.max(...outTracks.map(t => t.trackDur));
+
+    // --- 4. Escribir el MP4 normal ---
+    const mk = (type, ...parts) => {
+        const arrs = parts.map(p => p instanceof Uint8Array ? p : Uint8Array.from(p));
+        let len = 8;
+        for (const a of arrs) len += a.length;
+        const out = new Uint8Array(len);
+        new DataView(out.buffer).setUint32(0, len);
+        out.set(ascii(type), 4);
+        let o = 8;
+        for (const a of arrs) { out.set(a, o); o += a.length; }
+        return out;
+    };
+    // Box "completo" (con versión y banderas) cuyo contenido son números de 32 bits
+    const full = (type, version, flags, words) => {
+        const out = new Uint8Array(12 + words.length * 4);
+        const dv = new DataView(out.buffer);
+        dv.setUint32(0, out.length);
+        out.set(ascii(type), 4);
+        dv.setUint32(8, ((version << 24) | flags) >>> 0);
+        for (let i = 0; i < words.length; i++) dv.setUint32(12 + i * 4, words[i] >>> 0);
+        return out;
+    };
+    // [a,a,a,b] -> [3,a, 1,b]
+    const rle = (arr) => {
+        const out = [];
+        for (let i = 0; i < arr.length;) {
+            let j = i + 1;
+            while (j < arr.length && arr[j] === arr[i]) j++;
+            out.push(j - i, arr[i]);
+            i = j;
+        }
+        return out;
+    };
+    const setDur = (box, hdr, v1Off, v0Off, version, value) => {
+        const dv = new DataView(box.buffer, box.byteOffset, box.byteLength);
+        if (version === 1) dv.setBigUint64(hdr + v1Off, BigInt(value)); else dv.setUint32(hdr + v0Off, value);
+    };
+
+    const buildMoov = () => {
+        const traks = outTracks.map((t) => {
+            // Tabla de muestras nueva
+            const stts = rle(t.dur);
+            const stscWords = [];
+            let prevCount = -1;
+            t.chunks.forEach((c, i) => {
+                if (c.count !== prevCount) { stscWords.push(i + 1, c.count, 1); prevCount = c.count; }
+            });
+            const stbl = [
+                t.stsd ? moov.slice(t.stsd.start, t.stsd.end) : new Uint8Array(0),
+                full('stts', 0, 0, [stts.length / 2, ...stts]),
+                full('stsc', 0, 0, [stscWords.length / 3, ...stscWords]),
+                full('stsz', 0, 0, [0, t.size.length, ...t.size]),
+                full('stco', 0, 0, [t.chunks.length, ...t.chunks.map(c => c.dst)])
+            ];
+            if (t.sync.length && t.sync.length < t.dur.length) stbl.push(full('stss', 0, 0, [t.sync.length, ...t.sync]));
+            if (t.hasCto) {
+                const ctts = rle(t.cto);
+                stbl.push(full('ctts', t.negCto ? 1 : 0, 0, [ctts.length / 2, ...ctts]));
+            }
+
+            const minfParts = kids(moov, t.minf).map(b =>
+                b.type === 'stbl' ? mk('stbl', ...stbl) : moov.slice(b.start, b.end));
+            const mdiaParts = kids(moov, t.mdia).map(b => {
+                if (b.type === 'minf') return mk('minf', ...minfParts);
+                const copy = moov.slice(b.start, b.end);
+                if (b.type === 'mdhd') setDur(copy, b.hdr, 24, 16, t.mv, t.mediaDur);
+                return copy;
+            });
+
+            const trakParts = [];
+            for (const b of kids(moov, t.trak)) {
+                if (b.type === 'edts') continue;
+                if (b.type === 'mdia') { trakParts.push(mk('mdia', ...mdiaParts)); continue; }
+                const copy = moov.slice(b.start, b.end);
+                if (b.type === 'tkhd') {
+                    setDur(copy, b.hdr, 28, 20, t.tv, t.trackDur);
+                    trakParts.push(copy);
+                    // Si la pista empieza más tarde que las demás: un tramo vacío al inicio
+                    if (t.delay > 0) {
+                        const mediaMovDur = t.trackDur - t.delay;
+                        trakParts.push(mk('edts', full('elst', 0, 0, [2, t.delay, 0xFFFFFFFF, 0x00010000, mediaMovDur, 0, 0x00010000])));
+                    }
+                } else {
+                    trakParts.push(copy);
+                }
+            }
+            return mk('trak', ...trakParts);
+        });
+
+        const mvhdCopy = moov.slice(mvhd.start, mvhd.end);
+        setDur(mvhdCopy, mvhd.hdr, 24, 16, mvhdV, movieDur);
+        return mk('moov', mvhdCopy, ...traks);
+    };
+
+    const ftyp = mk('ftyp', [...ascii('isom'), 0, 0, 2, 0, ...ascii('isom'), ...ascii('iso2'), ...ascii('avc1'), ...ascii('mp41')]);
+
+    // El tamaño del moov no depende de los desplazamientos: se arma una vez para medirlo y otra con los valores finales
+    const moovSize = buildMoov().length;
+    let cursor = ftyp.length + moovSize + 8;
+    for (const c of allChunks) { c.dst = cursor; cursor += c.size; }
+    if (cursor > 0xFFFFFFF0) throw new Error('El archivo es demasiado grande para reescribirlo');
+    const moovBytes = buildMoov();
+    if (moovBytes.length !== moovSize) throw new Error('Error interno al reescribir el MP4');
+
+    const dataSize = cursor - (ftyp.length + moovSize + 8);
+    const mdatHead = new Uint8Array(8);
+    new DataView(mdatHead.buffer).setUint32(0, 8 + dataSize);
+    mdatHead.set(ascii('mdat'), 4);
+
+    const parts = allChunks.map(c => blob.slice(c.src, c.src + c.size));
+    return new Blob([ftyp, moovBytes, mdatHead, ...parts], { type: 'video/mp4' });
+}
+
 // --- Botón Exportar -----------------------------------------------------------
+// La exportación graba la línea de tiempo EN TIEMPO REAL con MediaRecorder, así que el archivo dura
+// lo que tarda la grabación. Para que dure EXACTAMENTE lo que dura el proyecto:
+//  1. La duración (exportEnd) se fija UNA sola vez, al empezar.
+//  2. El bucle de grabación tiene su propia bandera (running): ningún pause() externo puede cortarlo
+//     antes de tiempo, y solo termina cuando el reloj llega a exportEnd.
+//  3. Si la ventana se oculta o se minimiza, el navegador detiene requestAnimationFrame. Antes el reloj
+//     "saltaba" al volver y la exportación terminaba de golpe (archivo cortado). Ahora la grabación y el
+//     reloj se ponen en PAUSA juntos y se reanudan al volver.
+//  4. Si el grabador se detiene solo o da error, se avisa: no se guarda un archivo corto en silencio.
 exportBtn.addEventListener('click', async () => {
     if (!currentProjectId || exporting || trimBusy) return;
 
     const project = currentProject();
-    const end = contentEnd();
-    if (end <= 0) {
+    const exportEnd = contentEnd(); // Duración EXACTA del proyecto (segundos), fijada una sola vez
+    if (exportEnd <= 0) {
         alert('El proyecto está vacío o no tiene duración.');
         return;
     }
@@ -2014,19 +2327,60 @@ exportBtn.addEventListener('click', async () => {
 
     // 3. Mostrar el progreso y bloquear la edición mientras se graba
     exporting = true;
+    exportProgress.style.whiteSpace = 'pre-line';
     exportProgress.textContent = 'Preparando...';
     exportModal.classList.remove('hidden');
 
     let stream = null;
     let recordDest = null;
+    let recorder = null;
+    let running = false;   // Controla el bucle de grabación (no depende de clock.playing)
+    let held = false;      // true mientras la ventana está oculta (grabación en pausa)
+    let heldSince = 0;
+    let heldMs = 0;        // Tiempo total que estuvo en pausa por ventana oculta
+    let recError = null;   // Error del grabador (si lo hubo)
+
+    const showProgress = () => {
+        const t = Math.min(clock.t, exportEnd);
+        const pct = Math.min(100, Math.round((t / exportEnd) * 100));
+        exportProgress.textContent =
+            `${formatTime(t)} / ${formatTime(exportEnd)}  (${pct}%)\nMantén esta ventana visible hasta que termine.`;
+    };
+
+    // Ventana oculta / minimizada: se pausa TODO junto (grabación, audio, reloj y videos)
+    const onVisibility = () => {
+        if (!running) return;
+
+        if (document.hidden && !held) {
+            held = true;
+            heldSince = performance.now();
+            clock.playing = false;          // syncClips() pausa los videos
+            syncClips();
+            try { if (recorder && recorder.state === 'recording') recorder.pause(); } catch (e) {}
+            if (audioCtx) audioCtx.suspend().catch(() => {});
+        } else if (!document.hidden && held) {
+            held = false;
+            heldMs += performance.now() - heldSince;
+            if (audioCtx) audioCtx.resume().catch(() => {});
+            try { if (recorder && recorder.state === 'paused') recorder.resume(); } catch (e) {}
+            clock.last = performance.now(); // El tiempo oculto no cuenta
+            clock.playing = true;
+            syncClips();
+        }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
 
     const cleanup = () => {
+        running = false;
+        document.removeEventListener('visibilitychange', onVisibility);
+        try { if (recorder && recorder.state !== 'inactive') recorder.stop(); } catch (e) {}
         if (stream) stream.getTracks().forEach(t => t.stop());
         if (recordDest) {
             Object.values(project.clips).forEach(c => {
                 if (c.gainNode) { try { c.gainNode.disconnect(recordDest); } catch (e) {} }
             });
         }
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
         exporting = false;
         clock.playing = false;
         cancelAnimationFrame(clock.raf);
@@ -2055,31 +2409,54 @@ exportBtn.addEventListener('click', async () => {
         const recorderOptions = { videoBitsPerSecond: 8000000, audioBitsPerSecond: 192000 };
         if (format.mime) recorderOptions.mimeType = format.mime;
 
-        const recorder = new MediaRecorder(stream, recorderOptions);
+        recorder = new MediaRecorder(stream, recorderOptions);
         const chunks = [];
         recorder.ondataavailable = (e) => {
             if (e.data && e.data.size > 0) chunks.push(e.data);
         };
+        recorder.onerror = (e) => {
+            recError = (e && e.error) || new Error('Error del grabador de video');
+            running = false;
+        };
         const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
 
-        recorder.start(1000);
-
         // 5. Reproducir la línea de tiempo en tiempo real mientras se graba
+        const loopStart = performance.now();
+        // WebM: sin "timeslice" Chrome sí escribe la duración en el archivo. MP4: se arregla más abajo.
+        if (format.ext === 'webm') recorder.start(); else recorder.start(1000);
+        running = true;
         clock.t = 0;
         clock.playing = true;
-        clock.last = performance.now();
+        clock.last = loopStart;
         syncClips(); // Arranca los videos que empiezan en el segundo 0
 
         await new Promise((resolve) => {
-            const exportTick = (ts) => {
-                if (!clock.playing) { resolve(); return; }
+            const exportTick = () => {
+                if (!running) { resolve(); return; }
+                const now = performance.now();
 
-                clock.t += Math.max(0, (ts - clock.last) / 1000);
-                clock.last = ts;
-                exportProgress.textContent = `${Math.min(100, Math.round((clock.t / end) * 100))}%`;
+                // Ventana oculta: no se avanza el reloj (la grabación está en pausa)
+                if (held) {
+                    clock.last = now;
+                    requestAnimationFrame(exportTick);
+                    return;
+                }
 
-                if (clock.t >= end) {
-                    clock.playing = false;
+                // El grabador se detuvo por su cuenta: se avisa en vez de guardar un archivo corto
+                if (recorder.state === 'inactive') {
+                    recError = recError || new Error('El grabador se detuvo antes de terminar.');
+                    running = false;
+                    resolve();
+                    return;
+                }
+
+                clock.t += Math.max(0, (now - clock.last) / 1000);
+                clock.last = now;
+                showProgress();
+
+                // Termina SOLO cuando se alcanzó la duración total del proyecto
+                if (clock.t >= exportEnd) {
+                    running = false;
                     resolve();
                     return;
                 }
@@ -2090,33 +2467,57 @@ exportBtn.addEventListener('click', async () => {
             };
             requestAnimationFrame(exportTick);
         });
+        clock.playing = false;
+        const loopMs = performance.now() - loopStart - heldMs; // Tiempo realmente grabado
+        if (recError) throw recError;
 
-        // Pequeño margen para que se grabe el final del audio (los videos van un poco por detrás del reloj)
-// Margen final: entra el final del audio y se muestran los últimos cuadros retrasados
-const tailEnd = performance.now() + Math.max(300, AV_DELAY_EXPORT * 1000 + 100);
-await new Promise((resolve) => {
-    const tailTick = () => {
-        const now = performance.now();
-        const d = currentAvDelay();
-        if (d > 0) showDelayedFrame(now, d);
-        if (now >= tailEnd) { resolve(); return; }
-        requestAnimationFrame(tailTick);
-    };
-    requestAnimationFrame(tailTick);
-});        recorder.stop();
+        // Margen final: entra el final del audio y se muestran los últimos cuadros retrasados
+        const tailMs = Math.max(250, AV_DELAY_EXPORT * 1000 + 50);
+        const tailEnd = performance.now() + tailMs;
+        await new Promise((resolve) => {
+            const timer = setTimeout(resolve, tailMs + 100); // Por si requestAnimationFrame se detiene
+            const tailTick = () => {
+                const now = performance.now();
+                const d = currentAvDelay();
+                if (d > 0) showDelayedFrame(now, d);
+                if (now >= tailEnd) { clearTimeout(timer); resolve(); return; }
+                requestAnimationFrame(tailTick);
+            };
+            requestAnimationFrame(tailTick);
+        });
+
+        if (recorder.state !== 'inactive') recorder.stop();
         await stopped;
 
         const blob = new Blob(chunks, { type: (recorder.mimeType || format.type).split(';')[0] });
-        await saveBlob(blob, fileHandle, fileName);
+
+        // El MP4 de Chrome no trae la duración en el encabezado: se reescribe como MP4 normal.
+        // (Si algo falla se guarda el archivo original, igual que antes.)
+        let finalBlob = blob;
+        if (format.ext === 'mp4') {
+            exportProgress.textContent = 'Ajustando la duración del archivo...';
+            try {
+                finalBlob = await fragmentedMp4ToMp4(blob);
+            } catch (err) {
+                console.warn('[Exportar] No se pudo reescribir el MP4; se guarda tal como lo entregó el navegador.', err);
+            }
+        }
+
+        await saveBlob(finalBlob, fileHandle, fileName);
+        console.log(
+            `[Exportar] proyecto: ${exportEnd.toFixed(2)} s · grabado: ${(loopMs / 1000).toFixed(2)} s · ` +
+            `${(finalBlob.size / 1048576).toFixed(1)} MB · ${recorder.mimeType || format.type}` +
+            (finalBlob !== blob ? ' · duración corregida' : '')
+        );
         ok = true;
     } catch (err) {
         console.error(err);
-        alert('Hubo un error al exportar el video.');
+        alert('Hubo un error al exportar el video.' + (err && err.message ? `\n\n${err.message}` : ''));
     } finally {
         cleanup();
     }
 
-    if (ok) alert('¡Video exportado con éxito!');
+    if (ok) alert(`¡Video exportado con éxito!\nDuración: ${formatTime(exportEnd)}`);
 });
 // --- Control del Menú de Relación de Aspecto ---
 const aspectMenuBtn = document.getElementById('aspectMenuBtn');
