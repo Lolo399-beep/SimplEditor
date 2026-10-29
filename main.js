@@ -97,6 +97,8 @@ function serializeRows() {
             .map(el => ({
                 id: el._clip.id,
                 start: el._clip.start,
+                type: el._clip.type || 'video',
+                chroma: el._clip.chroma || 'none',
                 srcStart: el._clip.srcStart || 0,     // Dónde empieza este fragmento dentro del archivo
                 duration: el._clip.duration,          // Cuánto dura (cambia al recortar)
                 muted: !!el._clip.muted,
@@ -242,7 +244,7 @@ addBtn.addEventListener('click', () => {
         name: `Proyecto ${projectCount}`,
         rowsWidth: '500px',
         rowsData: [],
-        clips: {}          // Videos importados: id -> clip
+        clips: {}          // Medios importados (videos e imágenes): id -> clip
     };
 
     const card = document.createElement('div');
@@ -305,6 +307,7 @@ function buildRows(rowsData, project) {
             const clip = project.clips[c.id];
             if (!clip) return;
             clip.start = c.start;
+            if (c.chroma != null) clip.chroma = c.chroma;
             if (c.srcStart != null) clip.srcStart = c.srcStart;
             if (c.duration != null) clip.duration = c.duration;
             clip.muted = !!c.muted;
@@ -603,7 +606,7 @@ const clipMenu = createMenu(`
     <div class="context-menu-separator"></div>
     <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
     <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
-    <div class="context-menu-item" data-chroma="none">No quitar fondo</div>
+    <div class="context-menu-item" data-chroma="none">Quitar transparencia</div>
     <div class="context-menu-item" data-action="rethumb">Recargar fotogramas</div>
     <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
 `);
@@ -614,6 +617,8 @@ function showClipContextMenu(x, y, clip) {
     if (trimBusy) return;
     clipTarget = clip;
 
+    const isImage = clip.type === 'image';
+    clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
     const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
     const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
     muteItem.textContent = clip.muted ? 'Sonorizar' : 'Silenciar';
@@ -665,11 +670,11 @@ fileInput.addEventListener('change', async () => {
 
     const failed = [];
     for (const file of files) {
-        const ok = await importVideoFile(file);
+        const ok = file.type.startsWith('image/') ? await importImageFile(file) : file.type.startsWith('video/') ? await importVideoFile(file) : false;
         if (!ok) failed.push(file.name);
     }
     if (failed.length) {
-        alert(`El navegador no pudo cargar estos archivos (formato o códec no compatible):\n\n${failed.join('\n')}`);
+        alert(`No se pudieron cargar estos archivos. Comprueba que sean imágenes o videos compatibles:\n\n${failed.join('\n')}`);
     }
 });
 
@@ -705,6 +710,37 @@ async function importVideoFile(file) {
     commit();
 
     queueThumbnails(clip);
+    refreshPreview();
+    return true;
+}
+
+// Importa una imagen como un clip estático de la línea de tiempo (duración inicial: 3 s).
+async function importImageFile(file) {
+    const projectId = currentProjectId;
+    if (!projectId || !file.type.startsWith('image/')) return false;
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.decoding = 'async';
+    const loaded = await new Promise(resolve => {
+        image.onload = () => resolve(true);
+        image.onerror = () => resolve(false);
+        image.src = url;
+    });
+    if (!loaded) { URL.revokeObjectURL(url); return false; }
+    if (projectId !== currentProjectId) { URL.revokeObjectURL(url); return true; }
+
+    const clip = {
+        id: `image_${Date.now()}_${++clipSeq}`, type: 'image', name: file.name, url, image,
+        video: null, duration: 3, aspect: image.naturalWidth / image.naturalHeight,
+        source: null, srcStart: 0, start: 0, chroma: 'none', chromaManual: true,
+        muted: true, locked: false, el: null, thumbs: null, thumbCtx: null,
+        thumbKey: '', disposed: false, badge: null
+    };
+    currentProject().clips[clip.id] = clip;
+    const row = findEmptyRow() || createRowElement(true);
+    placeClip(row, clip);
+    fitTimeline();
+    commit();
     refreshPreview();
     return true;
 }
@@ -790,6 +826,7 @@ function loadClip(file) {
 function disposeClip(clip) {
     clip.disposed = true;
     if (clip.source) clip.source.disposed = true; // Corta la generación de miniaturas en curso
+    if (clip.type === 'image') { if (clip.url) URL.revokeObjectURL(clip.url); return; }
     if (clip.gainNode) { try { clip.gainNode.disconnect(); } catch (e) {} }
     if (clip.audioSource) { try { clip.audioSource.disconnect(); } catch (e) {} }
     clip.video.pause();
@@ -804,8 +841,9 @@ function createClipElement(clip) {
     el.title = clip.name;
     el._clip = clip;
     clip.el = el;
-    clip.source.clips.add(clip);
+    if (clip.source && clip.source.clips) clip.source.clips.add(clip);
 
+    // Las imágenes muestran su propia miniatura; los videos muestran su tira de fotogramas.
     // Canvas con los frames (filmstrip): copia el tramo de la fuente que le toca a este fragmento
     const thumbs = document.createElement('canvas');
     thumbs.width = 1;
@@ -823,10 +861,43 @@ function createClipElement(clip) {
     clip.badge = badge;
 
     el.append(thumbs, label, badge);
+    if (clip.type === 'image' && clip.image) {
+        el.classList.add('image-clip');
+        const tctx = thumbs.getContext('2d');
+        tctx.clearRect(0, 0, thumbs.width, thumbs.height);
+        thumbs.width = Math.max(1, Math.ceil(clip.duration * PX_PER_SEC));
+        thumbs.height = THUMB_H;
+        const tileW = Math.max(1, Math.round(THUMB_H * clip.aspect));
+        for (let x = 0; x < thumbs.width; x += tileW) tctx.drawImage(clip.image, x, 0, Math.min(tileW, thumbs.width-x), THUMB_H);
+    }
     updateClipBadge(clip);
     layoutClip(clip);
 
     setupClipDrag(clip);
+
+    // En las imágenes, arrastrar el borde derecho cambia su duración exacta.
+    if (clip.type === 'image') {
+        const resize = document.createElement('div');
+        resize.className = 'image-resize-handle';
+        resize.title = 'Arrastra para alargar o acortar la imagen';
+        el.appendChild(resize);
+        resize.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0 || clip.locked || el.parentElement?.classList.contains('locked') || trimMode) return;
+            e.preventDefault(); e.stopPropagation(); hideMenus();
+            const startX = e.clientX, startDuration = clip.duration;
+            const move = ev => {
+                clip.duration = Math.max(0.1, startDuration + (ev.clientX - startX) / PX_PER_SEC);
+                layoutClip(clip); fitTimeline(); requestRender();
+            };
+            const up = () => {
+                window.removeEventListener('pointermove', move);
+                window.removeEventListener('pointerup', up);
+                commit(); refreshPreview();
+            };
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', up, { once: true });
+        });
+    }
 
     el.addEventListener('contextmenu', (e) => {
         e.preventDefault();
@@ -855,8 +926,20 @@ function layoutClip(clip) {
 function drawClipFilmstrip(clip, force = false) {
     const cv = clip.thumbs;
     const ctx = clip.thumbCtx;
+    if (!cv || !ctx) return;
+    if (clip.type === 'image') {
+        const w = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
+        if (cv.width !== w) cv.width = w;
+        if (cv.height !== THUMB_H) cv.height = THUMB_H;
+        ctx.fillStyle = '#202020'; ctx.fillRect(0, 0, cv.width, cv.height);
+        if (clip.image && clip.image.complete) {
+            const tileW = Math.max(1, Math.round(THUMB_H * clip.aspect));
+            for (let x = 0; x < cv.width; x += tileW) ctx.drawImage(clip.image, x, 0, Math.min(tileW, cv.width - x), THUMB_H);
+        }
+        return;
+    }
     const strip = clip.source && clip.source.thumbs;
-    if (!cv || !ctx || !strip) return;
+    if (!strip) return;
 
     const key = `${clip.srcStart.toFixed(3)}|${clip.duration.toFixed(3)}`;
     if (!force && clip.thumbKey === key) return;
@@ -884,7 +967,7 @@ function refreshFilmstrips(source) {
 function deleteClip(clip) {
     const row = clip.el.parentElement;
     if (clip.locked || (row && row.classList.contains('locked'))) return;
-    clip.video.pause();
+    if (clip.video) clip.video.pause();
     clip.el.remove(); // El clip sigue guardado, así Ctrl+Z puede recuperarlo
     commit();
     refreshPreview();
@@ -1328,6 +1411,7 @@ function hasUnreadyActiveClip() {
     forEachClipBottomUp((clip) => {
         const local = clock.t - clip.start;
         if (local < 0 || local >= clip.duration) return;
+        if (clip.type === 'image') return;
         const v = clip.video;
         if (v.seeking || v.readyState < 2 || !v.videoWidth) unready = true;
     });
@@ -1407,8 +1491,19 @@ function renderComposite(ctx) {
         const local = clock.t - clip.start;
         if (local < 0 || local >= clip.duration) return;
 
+        if (clip.type === 'image') {
+            const img = clip.image;
+            if (!img || !img.complete || !img.naturalWidth) return;
+            const scale = Math.min(canvasW / img.naturalWidth, canvasH / img.naturalHeight);
+            const w = Math.max(1, Math.round(img.naturalWidth * scale));
+            const h = Math.max(1, Math.round(img.naturalHeight * scale));
+            const x = Math.round((canvasW - w) / 2), y = Math.round((canvasH - h) / 2);
+            if (clip.chroma === 'none') ctx.drawImage(img, x, y, w, h);
+            else { sctx.clearRect(0, 0, canvasW, canvasH); sctx.drawImage(img, x, y, w, h); applyChromaKey(sctx, x, y, w, h, clip.chroma); ctx.drawImage(scratch, 0, 0); }
+            return;
+        }
         const v = clip.video;
-        if (v.readyState < 2 || !v.videoWidth) return;
+        if (!v || v.readyState < 2 || !v.videoWidth) return;
 
         const s = Math.min(canvasW / v.videoWidth, canvasH / v.videoHeight);
         const w = Math.max(1, Math.round(v.videoWidth * s));
@@ -1474,6 +1569,7 @@ function syncClips() {
     const tolerance = exporting ? 0.6 : DRIFT_TOLERANCE; // Al exportar se evitan saltos innecesarios
 
     for (const clip of Object.values(currentProject().clips)) {
+        if (clip.type === 'image') continue;
         const v = clip.video;
 
         if (!clip.el || !clip.el.isConnected) { // Clip eliminado o fuera de pantalla
@@ -1601,7 +1697,7 @@ function stopPlayback() {
     clock.playing = false;
     cancelAnimationFrame(clock.raf);
     if (currentProjectId && projects[currentProjectId]) {
-        Object.values(projects[currentProjectId].clips).forEach(c => c.video.pause());
+        Object.values(projects[currentProjectId].clips).forEach(c => { if (c.video) c.video.pause(); });
     }
 }
 
@@ -1781,6 +1877,7 @@ function ensureAudioGraph() {
     }
 
     for (const clip of Object.values(currentProject().clips)) {
+        if (clip.type === 'image' || !clip.video) continue;
         if (clip.audioSource) continue; // createMediaElementSource solo se puede llamar una vez por <video>
         try {
             clip.audioSource = audioCtx.createMediaElementSource(clip.video);
@@ -1819,7 +1916,7 @@ function waitVideoReady(v, ms = 4000) {
 async function prepareClipsAtStart(project) {
     clock.t = 0;
 
-    const clips = Object.values(project.clips).filter(c => c.el && c.el.isConnected);
+    const clips = Object.values(project.clips).filter(c => c.type !== 'image' && c.video && c.el && c.el.isConnected);
     clips.forEach(c => {
         c.video.pause();
         c.video.currentTime = c.srcStart || 0; // Primer frame del FRAGMENTO (no del archivo)
