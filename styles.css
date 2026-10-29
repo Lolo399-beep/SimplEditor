@@ -879,3 +879,64 @@ h1 {
 .fs-seek.dragging .fs-seek-tip {
     display: flex;
 }
+
+/* --- Modo recortes --- */
+
+/* Cuadro de selección que se arrastra sobre la línea de tiempo */
+.trim-selection {
+    position: absolute;
+    display: none;
+    background-color: rgba(255, 77, 77, 0.25);
+    border: 1px dashed #ff4d4d;
+    pointer-events: none;
+    z-index: 35;
+}
+
+.trim-selection-label {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    padding: 0 5px;
+    font-size: 11px;
+    line-height: 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background-color: #ff4d4d;
+    color: #000000;
+    white-space: nowrap;
+}
+
+/* Aviso fijo mientras el modo está activo */
+.trim-banner {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    padding: 10px 18px;
+    background-color: #000000;
+    border: 1px solid #ff4d4d;
+    color: #ffffff;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 900;
+}
+
+/* Con el modo activo la línea de tiempo queda inmóvil: nada se arrastra ni se mueve */
+body.trim-mode .rows-container,
+body.trim-mode .row-item {
+    cursor: crosshair;
+}
+
+body.trim-mode .clip {
+    pointer-events: none;   /* Los clics caen en la fila: se dibuja el cuadro en vez de arrastrar el clip */
+    cursor: crosshair;
+}
+
+body.trim-mode .row-grip,
+body.trim-mode .row-handle {
+    pointer-events: none;   /* No se reordenan filas ni se estira la tabla */
+}
+
+body.trim-mode .ruler {
+    cursor: not-allowed;    /* No se mueve el cabezal desde la regla */
+}
