@@ -1,12 +1,3 @@
-// =====================================================================
-//  Editor de video por proyectos
-//  - Importar videos (explorador de archivos)
-//  - Frames visibles dentro de cada clip
-//  - Reproducción compuesta en un canvas (fila superior = capa superior)
-//  - Chroma key automático (verde / azul) con opción manual
-//  - Clips arrastrables: arriba/abajo (jerarquía) e izquierda/derecha (tiempo)
-// =====================================================================
-
 // --- Constantes del editor ---
 const PX_PER_SEC = 40;          // Escala de la línea de tiempo (px por segundo)
 const THUMB_H = 58;             // Alto del filmstrip (alto de la fila - bordes)
@@ -15,6 +6,10 @@ const PREVIEW_W = 640;          // Resolución interna de la vista previa
 const PREVIEW_H = 360;          // (bájala a 480x270 si va lento)
 const DRIFT_TOLERANCE = 0.35;   // Segundos de desfase permitidos antes de re-sincronizar un video
 const EPS = 0.001;
+// Sincronía audio / imagen: segundos que se retrasa la IMAGEN para igualarla al audio
+const AV_DELAY_PREVIEW = 0.2;   // al reproducir en el editor
+const AV_DELAY_EXPORT = 0.2;    // en el video exportado
+const FRAME_CAPTURE_MS = 30;    // cada cuánto se guarda un cuadro del retraso (~33 fps)
 
 // Ajustes del chroma key
 const CHROMA_MIN_DIFF = 20;     // Diferencia mínima entre el canal clave y los demás
@@ -1340,15 +1335,72 @@ function hasUnreadyActiveClip() {
 }
 
 // Reemplaza la función render() por esta versión que soporta relaciones de aspecto dinámicas:
+const frameDelay = { buf: [], pool: [], last: 0 };
+
+// Cuánto hay que retrasar la imagen ahora mismo (0 = nada)
+function currentAvDelay() {
+    if (!audioCtx || !currentProjectId || !projects[currentProjectId]) return 0;
+    const routed = Object.values(currentProject().clips).some(c => c.gainNode);
+    if (!routed) return 0; // Sin Web Audio el navegador ya sincroniza solo
+    return exporting ? AV_DELAY_EXPORT : AV_DELAY_PREVIEW;
+}
+
+function clearFrameDelay() {
+    frameDelay.buf.length = 0;
+    frameDelay.pool.length = 0;
+}
+
+// Dibuja en la vista previa el cuadro de hace "delay" segundos
+function showDelayedFrame(now, delay) {
+    const buf = frameDelay.buf;
+    if (!buf.length) return;
+
+    const limit = now - delay * 1000;
+    let idx = 0;
+    while (idx + 1 < buf.length && buf[idx + 1].t <= limit) idx++;
+
+    // Los cuadros anteriores al mostrado ya no hacen falta: se reciclan
+    for (let i = 0; i < idx; i++) frameDelay.pool.push(buf[i].canvas);
+    buf.splice(0, idx);
+
+    pctx.drawImage(buf[0].canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+}
+
 function render() {
     renderQueued = false;
     if (renderFrozen) return; // Se está preparando un corte: la vista previa conserva su último cuadro
 
+    const delay = clock.playing ? currentAvDelay() : 0;
+
+    // En pausa (o sin Web Audio) se dibuja directo, sin retraso
+    if (delay <= 0) {
+        clearFrameDelay();
+        renderComposite(pctx);
+        return;
+    }
+
+    // Reproduciendo: se compone en un lienzo aparte y se muestra el de hace "delay" segundos
+    const now = performance.now();
+    if (!frameDelay.buf.length || now - frameDelay.last >= FRAME_CAPTURE_MS) {
+        const w = previewCanvas.width;
+        const h = previewCanvas.height;
+        const frame = frameDelay.pool.pop() || document.createElement('canvas');
+        if (frame.width !== w) frame.width = w;
+        if (frame.height !== h) frame.height = h;
+        renderComposite(frame.getContext('2d'));
+        frameDelay.buf.push({ t: now, canvas: frame });
+        frameDelay.last = now;
+    }
+    showDelayedFrame(now, delay);
+}
+
+// Composición de todas las capas en el contexto que se le pase
+function renderComposite(ctx) {
     const canvasW = previewCanvas.width;
     const canvasH = previewCanvas.height;
 
-    pctx.fillStyle = '#000000';
-    pctx.fillRect(0, 0, canvasW, canvasH);
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, canvasW, canvasH);
     if (!currentProjectId) return;
 
     forEachClipBottomUp((clip) => {
@@ -1358,7 +1410,6 @@ function render() {
         const v = clip.video;
         if (v.readyState < 2 || !v.videoWidth) return;
 
-        // Ajuste "contain" proporcional a la nueva dimensión del canvas
         const s = Math.min(canvasW / v.videoWidth, canvasH / v.videoHeight);
         const w = Math.max(1, Math.round(v.videoWidth * s));
         const h = Math.max(1, Math.round(v.videoHeight * s));
@@ -1366,12 +1417,12 @@ function render() {
         const y = Math.round((canvasH - h) / 2);
 
         if (clip.chroma === 'none') {
-            pctx.drawImage(v, x, y, w, h);
+            ctx.drawImage(v, x, y, w, h);
         } else {
             sctx.clearRect(0, 0, canvasW, canvasH);
             sctx.drawImage(v, x, y, w, h);
             applyChromaKey(sctx, x, y, w, h, clip.chroma);
-            pctx.drawImage(scratch, 0, 0);
+            ctx.drawImage(scratch, 0, 0);
         }
     });
 }
@@ -1944,8 +1995,18 @@ exportBtn.addEventListener('click', async () => {
         });
 
         // Pequeño margen para que se grabe el final del audio (los videos van un poco por detrás del reloj)
-        await new Promise(r => setTimeout(r, 300));
-        recorder.stop();
+// Margen final: entra el final del audio y se muestran los últimos cuadros retrasados
+const tailEnd = performance.now() + Math.max(300, AV_DELAY_EXPORT * 1000 + 100);
+await new Promise((resolve) => {
+    const tailTick = () => {
+        const now = performance.now();
+        const d = currentAvDelay();
+        if (d > 0) showDelayedFrame(now, d);
+        if (now >= tailEnd) { resolve(); return; }
+        requestAnimationFrame(tailTick);
+    };
+    requestAnimationFrame(tailTick);
+});        recorder.stop();
         await stopped;
 
         const blob = new Blob(chunks, { type: (recorder.mimeType || format.type).split(';')[0] });
