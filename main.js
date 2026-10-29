@@ -76,6 +76,11 @@ let masterVolume = 1;
 let masterMuted = false;
 let renderQueued = false;
 
+// Modo recortes
+let trimMode = false;       // true mientras el modo recortes está activo (la línea de tiempo queda inmóvil)
+let trimBusy = false;       // true mientras se aplica un corte
+let renderFrozen = false;   // true mientras se prepara un corte: la vista previa conserva su último cuadro
+
 // Exportación y audio (Web Audio permite mezclar el sonido de los clips dentro del archivo exportado)
 let exporting = false;     // true mientras se graba el video
 let audioCtx = null;       // Contexto de audio (se crea al exportar, dentro de un clic del usuario)
@@ -97,6 +102,8 @@ function serializeRows() {
             .map(el => ({
                 id: el._clip.id,
                 start: el._clip.start,
+                srcStart: el._clip.srcStart || 0,     // Dónde empieza este fragmento dentro del archivo
+                duration: el._clip.duration,          // Cuánto dura (cambia al recortar)
                 muted: !!el._clip.muted,
                 locked: !!el._clip.locked
             }))
@@ -116,7 +123,7 @@ function recordState() {
 }
 
 function undo() {
-    if (undoStack.length <= 1) return; // Mantener al menos el estado inicial
+    if (trimBusy || undoStack.length <= 1) return; // Mantener al menos el estado inicial
 
     const currentState = undoStack.pop();
     redoStack.push(currentState);
@@ -125,7 +132,7 @@ function undo() {
 }
 
 function redo() {
-    if (redoStack.length === 0) return;
+    if (trimBusy || redoStack.length === 0) return;
 
     const nextState = redoStack.pop();
     undoStack.push(nextState);
@@ -151,6 +158,13 @@ function commit() {
 document.addEventListener('keydown', (e) => {
     if (!currentProjectId || exporting) return; // Solo dentro de un proyecto (y no mientras se exporta)
 
+    // Esc sale del modo recortes
+    if (e.key === 'Escape' && trimMode) {
+        e.preventDefault();
+        exitTrimMode();
+        return;
+    }
+
     const key = e.key.toLowerCase();
     if ((e.ctrlKey || e.metaKey) && key === 'z') {
         e.preventDefault();
@@ -171,6 +185,7 @@ redoBtn.addEventListener('click', redo);
 //  Navegación
 // =====================================================================
 function showMainView(pushToHistory = true) {
+    exitTrimMode();
     stopPlayback();
     saveCurrentProjectRows();
 
@@ -295,6 +310,8 @@ function buildRows(rowsData, project) {
             const clip = project.clips[c.id];
             if (!clip) return;
             clip.start = c.start;
+            if (c.srcStart != null) clip.srcStart = c.srcStart;
+            if (c.duration != null) clip.duration = c.duration;
             clip.muted = !!c.muted;
             clip.locked = !!c.locked;
             placeClip(row, clip);
@@ -317,7 +334,7 @@ function createRowElement(atTop = false) {
     grip.className = 'row-grip';
     grip.title = 'Arrastra para cambiar la jerarquía (arriba = por encima)';
     grip.textContent = '⋮⋮';
-    grip.addEventListener('mousedown', () => { row.draggable = true; });
+    grip.addEventListener('mousedown', () => { if (trimMode) return; row.draggable = true; });
     grip.addEventListener('mouseup', () => { row.draggable = false; });
 
     const handleLeft = document.createElement('div');
@@ -378,6 +395,7 @@ function createRowElement(atTop = false) {
 // Redimensionamiento de la línea de tiempo (Estiramiento y Acortamiento)
 function setupResizeHandlers(leftHandle, rightHandle) {
     const initResize = (e, direction) => {
+        if (trimMode) return; // En modo recortes la línea de tiempo no se mueve ni se estira
         e.preventDefault();
         const startX = e.clientX;
         const startWidth = rowsContainer.offsetWidth;
@@ -450,7 +468,7 @@ function fitTimeline() {
 
 // Click / arrastre sobre la regla para moverse en el tiempo
 ruler.addEventListener('pointerdown', (e) => {
-    if (!currentProjectId) return;
+    if (!currentProjectId || trimMode) return; // En modo recortes el cabezal no se mueve
     e.preventDefault();
 
     const seekTo = (ev) => {
@@ -501,12 +519,14 @@ const contextMenu = createMenu(`
     <div class="context-menu-item" id="muteRowOption">Silenciar</div>
     <div class="context-menu-item" id="unmuteRowOption">Sonorizar</div>
     <div class="context-menu-item" id="lockRowOption">Bloquear</div>
+    <div class="context-menu-item" id="trimModeOption">Modo recortes</div>
     <div class="context-menu-item danger" id="deleteRowOption">Borrar</div>
 `);
 
 let rowTarget = null;
 
 function showContextMenu(x, y, row) {
+    if (trimBusy) return;
     rowTarget = row;
 
     const muted = row.classList.contains('muted');
@@ -514,6 +534,8 @@ function showContextMenu(x, y, row) {
     document.getElementById('unmuteRowOption').style.display = muted ? 'block' : 'none';
     document.getElementById('lockRowOption').textContent =
         row.classList.contains('locked') ? 'Desbloquear' : 'Bloquear';
+    document.getElementById('trimModeOption').textContent =
+        trimMode ? 'Salir del modo recortes' : 'Modo recortes';
 
     openMenu(contextMenu, x, y);
 }
@@ -550,6 +572,10 @@ document.getElementById('deleteRowOption').addEventListener('click', () => {
     }
 });
 
+document.getElementById('trimModeOption').addEventListener('click', () => {
+    toggleTrimMode();
+});
+
 // --- Menú de proyectos ---
 const projectContextMenu = createMenu(
     `<div class="context-menu-item danger" id="deleteProjectOption">Borrar proyecto</div>`
@@ -578,6 +604,7 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
+    <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-separator"></div>
     <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
     <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
@@ -589,12 +616,15 @@ const clipMenu = createMenu(`
 let clipTarget = null;
 
 function showClipContextMenu(x, y, clip) {
+    if (trimBusy) return;
     clipTarget = clip;
 
     const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
     const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
     muteItem.textContent = clip.muted ? 'Sonorizar' : 'Silenciar';
     lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
+    clipMenu.querySelector('[data-action="trim-mode"]').textContent =
+        trimMode ? 'Salir del modo recortes' : 'Modo recortes';
 
     // Con el clip bloqueado solo queda disponible "Desbloquear"
     clipMenu.querySelectorAll('.context-menu-item').forEach(item => {
@@ -617,6 +647,8 @@ clipMenu.addEventListener('click', (e) => {
         setClipMuted(clipTarget, !clipTarget.muted);
     } else if (item.dataset.action === 'toggle-lock') {
         setClipLocked(clipTarget, !clipTarget.locked);
+    } else if (item.dataset.action === 'trim-mode') {
+        toggleTrimMode();
     } else if (item.dataset.action === 'rethumb') {
         queueThumbnails(clipTarget);
     } else if (item.dataset.action === 'delete') {
@@ -628,7 +660,7 @@ clipMenu.addEventListener('click', (e) => {
 //  Clips: importar, crear elemento, miniaturas
 // =====================================================================
 importBtn.addEventListener('click', () => {
-    if (!currentProjectId) return;
+    if (!currentProjectId || trimBusy) return;
     fileInput.click(); // Abre el explorador de archivos
 });
 
@@ -682,6 +714,13 @@ async function importVideoFile(file) {
     return true;
 }
 
+// Al terminar un salto en el tiempo, repinta la vista previa si está en pausa
+function attachSeekedRender(video) {
+    video.addEventListener('seeked', () => {
+        if (!clock.playing && currentProjectId) requestRender();
+    });
+}
+
 // Carga el archivo en un <video> y devuelve el objeto clip (o null si falla)
 function loadClip(file) {
     return new Promise((resolve) => {
@@ -703,18 +742,38 @@ function loadClip(file) {
                 return;
             }
 
-            // Al terminar un salto en el tiempo, repinta la vista previa si está en pausa
-            video.addEventListener('seeked', () => {
-                if (!clock.playing && currentProjectId) requestRender();
-            });
+            attachSeekedRender(video);
+
+            // Fuente compartida: guarda la tira de fotogramas del archivo COMPLETO.
+            // Cada fragmento (clip) dibuja su parte desde aquí, así cortar no obliga a recalcular nada.
+            const duration = video.duration;
+            const aspect = video.videoWidth / video.videoHeight;
+            const strip = document.createElement('canvas');
+            strip.width = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(duration * PX_PER_SEC)));
+            strip.height = THUMB_H;
+            const stripCtx = strip.getContext('2d', { alpha: false });
+            stripCtx.fillStyle = '#1a1a1a';
+            stripCtx.fillRect(0, 0, strip.width, strip.height);
+            const source = {
+                url,
+                duration,
+                aspect,
+                thumbs: strip,
+                thumbCtx: stripCtx,
+                thumbBusy: false,        // Generando (o en cola para generar) sus miniaturas
+                disposed: false,         // true cuando se libera (detiene las miniaturas)
+                clips: new Set()         // Todos los fragmentos que usan este archivo
+            };
 
             resolve({
                 id: `clip_${Date.now()}_${++clipSeq}`,
                 name: file.name,
                 url,
                 video,
-                duration: video.duration,
-                aspect: video.videoWidth / video.videoHeight,
+                duration,                // Duración de ESTE fragmento (cambia al recortar)
+                aspect,
+                source,
+                srcStart: 0,             // Segundo del archivo donde empieza este fragmento
                 start: 0,                // Segundo en que aparece en la línea de tiempo
                 chroma: 'none',          // 'none' | 'green' | 'blue'
                 chromaManual: false,
@@ -723,8 +782,8 @@ function loadClip(file) {
                 el: null,
                 thumbs: null,
                 thumbCtx: null,
-                thumbBusy: false,        // Generando (o en cola para generar) sus miniaturas
-                disposed: false,         // true cuando se libera el clip (detiene las miniaturas)
+                thumbKey: '',            // Qué tramo de la fuente tiene dibujado la tira
+                disposed: false,         // true cuando se libera el clip
                 badge: null
             });
         }, { once: true });
@@ -734,7 +793,8 @@ function loadClip(file) {
 }
 
 function disposeClip(clip) {
-    clip.disposed = true; // Corta la generación de miniaturas en curso
+    clip.disposed = true;
+    if (clip.source) clip.source.disposed = true; // Corta la generación de miniaturas en curso
     if (clip.gainNode) { try { clip.gainNode.disconnect(); } catch (e) {} }
     if (clip.audioSource) { try { clip.audioSource.disconnect(); } catch (e) {} }
     clip.video.pause();
@@ -747,19 +807,17 @@ function createClipElement(clip) {
     const el = document.createElement('div');
     el.className = 'clip';
     el.title = clip.name;
-    el.style.width = `${clip.duration * PX_PER_SEC}px`;
     el._clip = clip;
     clip.el = el;
+    clip.source.clips.add(clip);
 
-    // Canvas donde se dibujan los frames (filmstrip)
+    // Canvas con los frames (filmstrip): copia el tramo de la fuente que le toca a este fragmento
     const thumbs = document.createElement('canvas');
-    thumbs.width = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
+    thumbs.width = 1;
     thumbs.height = THUMB_H;
-    const tctx = thumbs.getContext('2d', { alpha: false });
-    tctx.fillStyle = '#1a1a1a';
-    tctx.fillRect(0, 0, thumbs.width, thumbs.height);
     clip.thumbs = thumbs;
-    clip.thumbCtx = tctx;
+    clip.thumbCtx = thumbs.getContext('2d', { alpha: false });
+    clip.thumbKey = '';
 
     const label = document.createElement('span');
     label.className = 'clip-label';
@@ -771,6 +829,7 @@ function createClipElement(clip) {
 
     el.append(thumbs, label, badge);
     updateClipBadge(clip);
+    layoutClip(clip);
 
     setupClipDrag(clip);
 
@@ -786,8 +845,45 @@ function createClipElement(clip) {
 // Coloca el clip dentro de una fila en su posición de tiempo
 function placeClip(row, clip) {
     if (!clip.el) createClipElement(clip);
-    clip.el.style.left = `${clip.start * PX_PER_SEC}px`;
+    layoutClip(clip);
     row.appendChild(clip.el);
+}
+
+// Posición y ancho del clip en la línea de tiempo (y su tira de fotogramas)
+function layoutClip(clip) {
+    clip.el.style.left = `${clip.start * PX_PER_SEC}px`;
+    clip.el.style.width = `${clip.duration * PX_PER_SEC}px`;
+    drawClipFilmstrip(clip);
+}
+
+// Dibuja en la tira del fragmento el tramo [srcStart, srcStart + duration] de la tira completa de la fuente
+function drawClipFilmstrip(clip, force = false) {
+    const cv = clip.thumbs;
+    const ctx = clip.thumbCtx;
+    const strip = clip.source && clip.source.thumbs;
+    if (!cv || !ctx || !strip) return;
+
+    const key = `${clip.srcStart.toFixed(3)}|${clip.duration.toFixed(3)}`;
+    if (!force && clip.thumbKey === key) return;
+    clip.thumbKey = key;
+
+    const w = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
+    if (cv.width !== w) cv.width = w;          // (cambiar el ancho limpia el canvas)
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+
+    const k = strip.width / clip.source.duration;   // px de la tira por segundo de video
+    const sx = Math.max(0, clip.srcStart * k);
+    const sw = Math.min(strip.width - sx, clip.duration * k);
+    if (sw > 0) ctx.drawImage(strip, sx, 0, sw, strip.height, 0, 0, cv.width, cv.height);
+}
+
+// Cuando la fuente tiene fotogramas nuevos, vuelve a dibujar todos sus fragmentos
+function refreshFilmstrips(source) {
+    for (const clip of source.clips) {
+        if (clip.el && clip.el.isConnected) drawClipFilmstrip(clip, true);
+        else clip.thumbKey = ''; // Se redibuja cuando vuelva a la línea de tiempo (Deshacer / Rehacer)
+    }
 }
 
 function deleteClip(clip) {
@@ -853,12 +949,13 @@ let thumbQueue = Promise.resolve();
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function queueThumbnails(clip) {
-    if (clip.thumbBusy) return; // Ya se está generando (o está esperando su turno)
-    clip.thumbBusy = true;
+    const source = clip.source;
+    if (source.thumbBusy) return; // Ya se está generando (o está esperando su turno)
+    source.thumbBusy = true;
     thumbQueue = thumbQueue
-        .then(() => buildThumbnails(clip))
+        .then(() => buildThumbnails(source))
         .catch((err) => console.warn('No se pudieron generar las miniaturas de', clip.name, err))
-        .finally(() => { clip.thumbBusy = false; });
+        .finally(() => { source.thumbBusy = false; });
 }
 
 // Abre un <video> aparte, sin sonido y sin precarga, solo para sacar fotogramas
@@ -932,32 +1029,32 @@ function seekVideo(v, t, ms) {
 }
 
 // Captura el fotograma de un segundo, con varios intentos (cada uno espera más que el anterior)
-async function captureFrame(v, t, clip) {
+async function captureFrame(v, t, source) {
     for (let attempt = 0; attempt < THUMB_TRIES; attempt++) {
-        if (v.error || clip.disposed) return false;
-        const target = Math.max(0.01, Math.min(clip.duration - 0.05, t + attempt * 0.3));
+        if (v.error || source.disposed) return false;
+        const target = Math.max(0.01, Math.min(source.duration - 0.05, t + attempt * 0.3));
         if (await seekVideo(v, target, THUMB_SEEK_TIMEOUT * (attempt + 1))) return true;
     }
     return false;
 }
 
 // La generación espera mientras se reproduce o se exporta
-async function waitUntilIdle(clip) {
-    while ((clock.playing || exporting) && !clip.disposed) await sleep(300);
+async function waitUntilIdle(source) {
+    while ((clock.playing || exporting) && !source.disposed) await sleep(300);
 }
 
-async function buildThumbnails(clip) {
-    if (clip.disposed) return;
+async function buildThumbnails(source) {
+    if (source.disposed) return;
 
-    const canvas = clip.thumbs;
-    const ctx = clip.thumbCtx || canvas.getContext('2d');
+    const canvas = source.thumbs;
+    const ctx = source.thumbCtx || canvas.getContext('2d');
     const H = canvas.height;
 
     // Medidas "en pantalla": cada miniatura respeta la proporción del video. Si el clip es tan largo
     // que el canvas quedó limitado a MAX_THUMB_W, se dibuja comprimido (k < 1) y el navegador
     // lo estira de vuelta, así que no se deforma ni se pierde ninguna parte del clip.
-    const screenW = clip.duration * PX_PER_SEC;
-    const tileW = Math.max(16, Math.round(H * clip.aspect));
+    const screenW = source.duration * PX_PER_SEC;
+    const tileW = Math.max(16, Math.round(H * source.aspect));
     const tiles = Math.max(1, Math.ceil(screenW / tileW));
     const k = canvas.width / screenW;
 
@@ -967,7 +1064,7 @@ async function buildThumbnails(clip) {
     };
     const tileTime = (i) => {
         const frac = Math.min(0.999, (i * tileW + tileW / 2) / screenW);
-        return Math.max(0.01, Math.min(clip.duration - 0.05, frac * clip.duration));
+        return Math.max(0.01, Math.min(source.duration - 0.05, frac * source.duration));
     };
 
     // Orden de trabajo: de grueso a fino
@@ -995,18 +1092,19 @@ async function buildThumbnails(clip) {
         }
     };
 
+    let lastRefresh = 0;
     let tv = null;
     let retries = 0;
     const openVideo = async (isRetry) => {
         closeThumbVideo(tv);
         tv = null;
         if (isRetry && ++retries > THUMB_MAX_REOPENS) return false;
-        tv = await openThumbVideo(clip.url);
+        tv = await openThumbVideo(source.url);
         return !!tv;
     };
 
     try {
-        for (let round = 0; round < THUMB_ROUNDS && !clip.disposed; round++) {
+        for (let round = 0; round < THUMB_ROUNDS && !source.disposed; round++) {
             if (real.indexOf(0) < 0) break;                      // Ya están todas
             if (round > 0) await sleep(2000 * round);            // Respira antes de reintentar
             if (!(await openVideo(round > 0))) continue;
@@ -1016,31 +1114,33 @@ async function buildThumbnails(clip) {
             for (const pass of passes) {
                 for (const i of pass) {
                     if (real[i]) continue;
-                    if (clip.disposed) return;
+                    if (source.disposed) return;
 
                     // Mientras el usuario reproduce o exporta, se libera el decodificador y se espera
                     if (clock.playing || exporting) {
                         closeThumbVideo(tv);
                         tv = null;
-                        await waitUntilIdle(clip);
-                        if (clip.disposed) return;
+                        await waitUntilIdle(source);
+                        if (source.disposed) return;
                         if (!(await openVideo(false))) break outer;
                     }
 
-                    if (await captureFrame(tv, tileTime(i), clip)) {
+                    if (await captureFrame(tv, tileTime(i), source)) {
                         const r = tileRect(i);
                         ctx.drawImage(tv, r.x, 0, r.w, H);
                         real[i] = 1;
                         fails = 0;
 
                         // Con el primer fotograma se detecta si el video tiene pantalla verde o azul
-                        if (i === 0 && !clip.chromaManual && !clip.locked) {
+                        if (i === 0) {
                             const mode = detectChromaBackground(tv);
-                            if (mode !== 'none') {
-                                clip.chroma = mode;
-                                updateClipBadge(clip);
-                                requestRender();
-                            }
+                            if (mode !== 'none') applyDetectedChroma(source, mode);
+                        }
+
+                        // Cada tanto se refrescan las tiras de los fragmentos para verlas llenarse
+                        if (performance.now() - lastRefresh > 800) {
+                            lastRefresh = performance.now();
+                            refreshFilmstrips(source);
                         }
                     } else {
                         // El decodificador quedó trabado: se descarta y se abre uno nuevo
@@ -1049,13 +1149,26 @@ async function buildThumbnails(clip) {
                     }
                 }
                 fillGaps(); // Al terminar cada pasada la tira ya se ve completa
+                refreshFilmstrips(source);
             }
             fillGaps();     // También si la vuelta se cortó por fallos seguidos
+            refreshFilmstrips(source);
         }
     } finally {
         fillGaps();
+        refreshFilmstrips(source);
         closeThumbVideo(tv);
     }
+}
+
+// Aplica el chroma detectado a todos los fragmentos de esa fuente (salvo los que el usuario ya configuró)
+function applyDetectedChroma(source, mode) {
+    for (const c of source.clips) {
+        if (c.chromaManual || c.locked) continue;
+        c.chroma = mode;
+        if (c.badge) updateClipBadge(c);
+    }
+    requestRender();
 }
 
 // Mira el borde del frame: si es mayormente verde o azul intenso, es una pantalla de chroma
@@ -1229,6 +1342,7 @@ function hasUnreadyActiveClip() {
 // Reemplaza la función render() por esta versión que soporta relaciones de aspecto dinámicas:
 function render() {
     renderQueued = false;
+    if (renderFrozen) return; // Se está preparando un corte: la vista previa conserva su último cuadro
 
     const canvasW = previewCanvas.width;
     const canvasH = previewCanvas.height;
@@ -1319,11 +1433,14 @@ function syncClips() {
         const row = clip.el.parentElement;
         const local = clock.t - clip.start;
         const active = local >= 0 && local < clip.duration;
+        const srcT = clip.srcStart + local; // Segundo del ARCHIVO que corresponde a este instante
 
         if (!active) {
             if (!v.paused) v.pause();
-            // Deja listo el primer frame para cuando llegue su momento
-            if (local < 0 && v.currentTime > 0.05 && !v.seeking) v.currentTime = 0;
+            // Deja listo el primer frame del fragmento para cuando llegue su momento
+            if (local < 0 && Math.abs(v.currentTime - clip.srcStart) > 0.05 && !v.seeking) {
+                v.currentTime = clip.srcStart;
+            }
             continue;
         }
 
@@ -1341,11 +1458,11 @@ function syncClips() {
         }
 
         if (clock.playing) {
-            if (Math.abs(v.currentTime - local) > tolerance) v.currentTime = local;
+            if (Math.abs(v.currentTime - srcT) > tolerance) v.currentTime = srcT;
             if (v.paused) v.play().catch(() => {});
         } else {
             if (!v.paused) v.pause();
-            if (Math.abs(v.currentTime - local) > 0.03) v.currentTime = local;
+            if (Math.abs(v.currentTime - srcT) > 0.03) v.currentTime = srcT;
         }
     }
 }
@@ -1391,7 +1508,7 @@ function tick(ts) {
 }
 
 function play() {
-    if (!currentProjectId) return;
+    if (!currentProjectId || trimMode) return;
     const end = contentEnd();
     if (end <= 0 || clock.playing) return;
 
@@ -1415,13 +1532,14 @@ function pause() {
 }
 
 function replay() {
-    if (!currentProjectId) return;
+    if (!currentProjectId || trimMode) return;
     pause();
     clock.t = 0;
     play();
 }
 
 function seek(t) {
+    if (trimMode) return; // En modo recortes el cabezal no se mueve
     clock.t = Math.min(Math.max(0, t), timelineSeconds()); // Entre 0 y el final de la tabla
     if (clock.playing) clock.last = performance.now();
     refreshPreview();
@@ -1546,7 +1664,7 @@ function showSeekTip(ev) {
 }
 
 fsSeek.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || trimMode) return;
     e.preventDefault();
     fsSeek.setPointerCapture(e.pointerId);
 
@@ -1653,7 +1771,7 @@ async function prepareClipsAtStart(project) {
     const clips = Object.values(project.clips).filter(c => c.el && c.el.isConnected);
     clips.forEach(c => {
         c.video.pause();
-        c.video.currentTime = 0;
+        c.video.currentTime = c.srcStart || 0; // Primer frame del FRAGMENTO (no del archivo)
     });
     await Promise.all(clips.map(c => waitVideoReady(c.video)));
 
@@ -1706,7 +1824,7 @@ async function saveBlob(blob, fileHandle, fileName) {
 
 // --- Botón Exportar -----------------------------------------------------------
 exportBtn.addEventListener('click', async () => {
-    if (!currentProjectId || exporting) return;
+    if (!currentProjectId || exporting || trimBusy) return;
 
     const project = currentProject();
     const end = contentEnd();
@@ -1719,6 +1837,8 @@ exportBtn.addEventListener('click', async () => {
         alert('Este navegador no permite exportar video. Usa una versión actual de Chrome o Edge.');
         return;
     }
+
+    exitTrimMode();
 
     // 1. El audio se prepara DENTRO del clic (gesto del usuario); si no, el navegador lo deja en silencio
     ensureAudioGraph();
@@ -1935,6 +2055,405 @@ function renderPreviewAtTime(targetT) {
         }
     }
 }
+// =====================================================================
+//  Modo recortes
+//  - Clic derecho → "Modo recortes". Esc para salir.
+//  - Con el clic izquierdo se arrastra un cuadro sobre la línea de tiempo. Al soltar se
+//    borra ese tramo en las filas que toca el cuadro, y lo que queda a la derecha se corre
+//    hacia la izquierda hasta pegarse con lo anterior (se tapa el hueco).
+//  - Mientras está activo, la línea de tiempo queda inmóvil: no se mueve el cabezal, no se
+//    arrastran clips ni filas, no se reproduce. (La página sí se puede desplazar.)
+//
+//  Por qué no se traba ni se pone negro:
+//   1. Cada fragmento tiene su PROPIO <video>, ya posicionado en su primer frame. Al empalmar
+//      dos fragmentos no hay que "saltar" el mismo video, así que no hay tirones.
+//   2. El corte se prepara completo ANTES de tocar nada (videos cargados y ubicados en el
+//      frame que se verá bajo el cabezal) y la vista previa conserva su último cuadro mientras
+//      tanto. Después los datos y la pantalla cambian juntos, de golpe.
+//   3. Las miniaturas no se vuelven a generar: cada fragmento copia su tramo de la tira de la fuente.
+// =====================================================================
+const MIN_TRIM = 0.05;   // Segundos mínimos que debe abarcar el cuadro para contar como corte
+const SNAP_PX = 6;       // Los bordes del cuadro se pegan a bordes de clips / cabezal a esta distancia
+const TRIM_HINT = 'MODO RECORTES · arrastra un cuadro sobre la línea de tiempo para borrar ese tramo · Esc para salir';
+
+const timelineEl = document.getElementById('timeline');
+
+// Cuadro de selección (vive dentro de la línea de tiempo)
+const trimSelection = document.createElement('div');
+trimSelection.className = 'trim-selection';
+const trimSelectionLabel = document.createElement('span');
+trimSelectionLabel.className = 'trim-selection-label';
+trimSelection.appendChild(trimSelectionLabel);
+timelineEl.appendChild(trimSelection);
+
+// Aviso fijo mientras el modo está activo
+const trimBanner = document.createElement('div');
+trimBanner.className = 'trim-banner hidden';
+document.body.appendChild(trimBanner);
+
+let trimDrag = null; // { x0, y0, lastX, lastY, t0, t1, rows } mientras se arrastra el cuadro
+
+function enterTrimMode() {
+    if (!currentProjectId || exporting || trimMode) return;
+    pause();
+    hideMenus();
+    trimMode = true;
+    document.body.classList.add('trim-mode');
+    trimBanner.textContent = TRIM_HINT;
+    trimBanner.classList.remove('hidden');
+}
+
+function exitTrimMode() {
+    if (!trimMode) return;
+    endTrimDrag();
+    trimMode = false;
+    document.body.classList.remove('trim-mode');
+    trimBanner.classList.add('hidden');
+}
+
+function toggleTrimMode() {
+    if (trimMode) exitTrimMode(); else enterTrimMode();
+}
+
+// --- Selección con el mouse ------------------------------------------------
+
+// Filas que toca el rango vertical [y0, y1] (coordenadas relativas a la línea de tiempo)
+function trimRowsBetween(y0, y1, timelineTop) {
+    const lo = Math.min(y0, y1);
+    const hi = Math.max(y0, y1);
+    return Array.from(rowsContainer.children).filter(row => {
+        const b = row.getBoundingClientRect();
+        return b.bottom - timelineTop > lo && b.top - timelineTop < hi;
+    });
+}
+
+// Pega el tiempo a bordes de clips, al inicio y al cabezal si están muy cerca
+function snapTime(t) {
+    const tol = SNAP_PX / PX_PER_SEC;
+    let best = t;
+    let bestD = tol;
+    const consider = (c) => {
+        const d = Math.abs(c - t);
+        if (d < bestD) { bestD = d; best = c; }
+    };
+    consider(0);
+    consider(clock.t);
+    forEachClipBottomUp(clip => {
+        consider(clip.start);
+        consider(clip.start + clip.duration);
+    });
+    return best;
+}
+
+function updateTrimSelection() {
+    const d = trimDrag;
+    if (!d) return;
+
+    const tl = timelineEl.getBoundingClientRect();
+    const cx = d.lastX - tl.left;
+    const cy = d.lastY - tl.top;
+    const maxT = timelineSeconds();
+    const toTime = (x) => snapTime(Math.min(maxT, Math.max(0, (x - 1) / PX_PER_SEC)));
+
+    const a = toTime(Math.min(d.x0, cx));
+    const b = toTime(Math.max(d.x0, cx));
+    const rows = trimRowsBetween(d.y0, cy, tl.top);
+    d.t0 = a;
+    d.t1 = b;
+    d.rows = rows;
+
+    if (!rows.length) {
+        trimSelection.style.display = 'none';
+        return;
+    }
+
+    // El cuadro cubre las filas completas que se van a recortar
+    const top = rows[0].getBoundingClientRect().top - tl.top;
+    const bottom = rows[rows.length - 1].getBoundingClientRect().bottom - tl.top;
+    trimSelection.style.display = 'block';
+    trimSelection.style.left = `${a * PX_PER_SEC + 1}px`;
+    trimSelection.style.width = `${Math.max(0, (b - a) * PX_PER_SEC)}px`;
+    trimSelection.style.top = `${top}px`;
+    trimSelection.style.height = `${bottom - top}px`;
+    trimSelectionLabel.textContent = `${(b - a).toFixed(1)} s`;
+}
+
+function onTrimMove(ev) {
+    if (!trimDrag) return;
+    trimDrag.lastX = ev.clientX;
+    trimDrag.lastY = ev.clientY;
+    updateTrimSelection();
+}
+
+function onTrimScroll() {
+    updateTrimSelection(); // Si la página se desplaza con el cuadro en curso, se recalcula
+}
+
+function onTrimUp(ev) {
+    const d = trimDrag;
+    if (!d) return;
+    d.lastX = ev.clientX;
+    d.lastY = ev.clientY;
+    updateTrimSelection();
+
+    const { t0, t1, rows } = d;
+    endTrimDrag();
+    if (t1 - t0 >= MIN_TRIM && rows.length) applyTrim(t0, t1, rows);
+}
+
+function endTrimDrag() {
+    window.removeEventListener('pointermove', onTrimMove);
+    window.removeEventListener('pointerup', onTrimUp);
+    window.removeEventListener('pointercancel', endTrimDrag);
+    window.removeEventListener('scroll', onTrimScroll, true);
+    trimDrag = null;
+    trimSelection.style.display = 'none';
+}
+
+timelineEl.addEventListener('pointerdown', (e) => {
+    if (!trimMode || trimBusy || exporting || !currentProjectId || e.button !== 0) return;
+
+    const tl = timelineEl.getBoundingClientRect();
+    const y0 = e.clientY - tl.top;
+    if (!trimRowsBetween(y0, y0, tl.top).length) return; // Solo se empieza a dibujar dentro de las filas
+
+    e.preventDefault();
+    hideMenus();
+    endTrimDrag();
+    trimDrag = { x0: e.clientX - tl.left, y0, lastX: e.clientX, lastY: e.clientY, t0: 0, t1: 0, rows: [] };
+
+    window.addEventListener('pointermove', onTrimMove);
+    window.addEventListener('pointerup', onTrimUp);
+    window.addEventListener('pointercancel', endTrimDrag);
+    window.addEventListener('scroll', onTrimScroll, true);
+    updateTrimSelection();
+});
+
+// --- El corte ----------------------------------------------------------------
+
+// Calcula (sin tocar nada) qué le pasa a cada clip de una fila al borrar el tramo [t0, t1].
+// Cada entrada: { clip, kind, parts }  →  parts[0] es el nuevo estado del clip y, si es un
+// 'split', parts[1] es el de la mitad derecha (que será un clip nuevo).
+//   remove: el clip cae por completo dentro del tramo
+//   trim:   se recorta por la izquierda o por la derecha
+//   split:  el tramo cae en el medio: queda una mitad a cada lado
+//   shift:  está a la derecha del tramo: se corre hacia la izquierda
+function planRowCut(row, t0, t1) {
+    const delta = t1 - t0;
+    const plan = [];
+    let touched = false;
+
+    for (const el of Array.from(row.children)) {
+        const clip = el._clip;
+        if (!clip) continue;
+
+        const s = clip.start;
+        const e = clip.start + clip.duration;
+
+        if (e <= t0 + EPS) continue; // Termina antes del corte: no cambia
+
+        if (s >= t1 - EPS) {         // Empieza después del corte: se corre a la izquierda
+            plan.push({
+                clip,
+                kind: 'shift',
+                parts: [{ start: Math.max(0, s - delta), srcStart: clip.srcStart, duration: clip.duration }]
+            });
+            continue;
+        }
+
+        touched = true;
+        const hasLeft = s < t0 - EPS;
+        const hasRight = e > t1 + EPS;
+        const left = { start: s, srcStart: clip.srcStart, duration: t0 - s };
+        const right = { start: t0, srcStart: clip.srcStart + (t1 - s), duration: e - t1 };
+
+        if (hasLeft && hasRight) plan.push({ clip, kind: 'split', parts: [left, right] });
+        else if (hasLeft) plan.push({ clip, kind: 'trim', parts: [left] });
+        else if (hasRight) plan.push({ clip, kind: 'trim', parts: [right] });
+        else plan.push({ clip, kind: 'remove', parts: [] });
+    }
+
+    return touched ? plan : []; // Si el cuadro no tocó ningún video, la fila no cambia
+}
+
+function setClipSpan(clip, part) {
+    clip.start = part.start;
+    clip.srcStart = part.srcStart;
+    clip.duration = part.duration;
+}
+
+// <video> nuevo para un fragmento: espera a que tenga datos antes de devolverlo
+function openClipVideo(url) {
+    return new Promise((resolve) => {
+        const v = document.createElement('video');
+        v.preload = 'auto';
+        v.playsInline = true;
+
+        let done = false;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            v.removeEventListener('loadeddata', onLoad);
+            v.removeEventListener('error', onError);
+            if (ok) {
+                attachSeekedRender(v);
+                resolve(v);
+            } else {
+                v.removeAttribute('src');
+                v.load();
+                resolve(null);
+            }
+        };
+        const onLoad = () => finish(!!v.videoWidth);
+        const onError = () => finish(false);
+        const timer = setTimeout(() => finish(false), 20000);
+
+        v.addEventListener('loadeddata', onLoad);
+        v.addEventListener('error', onError);
+        v.src = url;
+    });
+}
+
+// Nuevo clip que comparte archivo (y tira de fotogramas) con el original
+function createFragmentClip(parent, video) {
+    return {
+        id: `clip_${Date.now()}_${++clipSeq}`,
+        name: parent.name,
+        url: parent.url,
+        video,
+        duration: 0,
+        aspect: parent.aspect,
+        source: parent.source,
+        srcStart: 0,
+        start: 0,
+        chroma: parent.chroma,
+        chromaManual: parent.chromaManual,
+        muted: parent.muted,
+        locked: false,
+        el: null,
+        thumbs: null,
+        thumbCtx: null,
+        thumbKey: '',
+        disposed: false,
+        badge: null
+    };
+}
+
+function discardFragment(clip) {
+    clip.video.removeAttribute('src');
+    clip.video.load();
+}
+
+// Deja el video en el segundo pedido y espera a que ese frame esté listo para dibujarse
+async function prepareVideoAt(v, t) {
+    if (!v.seeking && v.readyState >= 2 && Math.abs(v.currentTime - t) <= 0.03) return true;
+    return seekVideo(v, t, 8000);
+}
+
+async function applyTrim(t0, t1, rows) {
+    if (trimBusy || !currentProjectId) return;
+
+    const projectId = currentProjectId;
+    const project = currentProject();
+
+    // 1) Qué le pasa a cada clip. Las filas bloqueadas (o con clips bloqueados) no se tocan.
+    const plans = [];
+    for (const row of rows) {
+        if (row.classList.contains('locked')) continue;
+        const plan = planRowCut(row, t0, t1);
+        if (!plan.length) continue;
+        if (plan.some(p => p.clip.locked)) continue;
+        plans.push({ row, plan });
+    }
+    if (!plans.length) return;
+
+    trimBusy = true;
+    renderFrozen = true; // La vista previa conserva su último cuadro hasta que todo esté listo
+    trimBanner.textContent = 'Recortando… un momento';
+
+    const created = [];
+    let applied = false;
+
+    try {
+        // 2) Un <video> nuevo por cada mitad derecha (cada fragmento tiene el suyo)
+        for (const { plan } of plans) {
+            for (const p of plan) {
+                if (p.kind !== 'split') continue;
+                const video = await openClipVideo(p.clip.url);
+                if (!video) throw new Error('No se pudo abrir el video para el recorte');
+                p.newClip = createFragmentClip(p.clip, video);
+                created.push(p.newClip);
+            }
+        }
+        if (projectId !== currentProjectId) throw new Error('cancelado'); // Salió del proyecto
+
+        // 3) Deja listos los frames que se verán bajo el cabezal con la nueva disposición,
+        //    y cada fragmento nuevo en su primer frame
+        const at = clock.t;
+        const jobs = [];
+        for (const { plan } of plans) {
+            for (const p of plan) {
+                if (p.kind === 'remove') continue;
+
+                const finals = [{ clip: p.clip, part: p.parts[0], isNew: false }];
+                if (p.newClip) finals.push({ clip: p.newClip, part: p.parts[1], isNew: true });
+
+                for (const { clip, part, isNew } of finals) {
+                    const local = at - part.start;
+                    const v = clip.video;
+                    if (local >= 0 && local < part.duration) {
+                        jobs.push(prepareVideoAt(v, part.srcStart + local));
+                    } else if (isNew) {
+                        jobs.push(prepareVideoAt(v, part.srcStart));
+                    } else if (local < 0 && Math.abs(v.currentTime - part.srcStart) > 0.05) {
+                        v.currentTime = part.srcStart; // Se va dejando listo, sin esperar
+                    }
+                }
+            }
+        }
+        await Promise.all(jobs);
+        if (projectId !== currentProjectId) throw new Error('cancelado');
+
+        // 4) Aplica todo de una vez (sin esperas): datos y pantalla cambian juntos
+        for (const { row, plan } of plans) {
+            for (const p of plan) {
+                if (p.kind === 'remove') {
+                    p.clip.video.pause();
+                    p.clip.el.remove(); // El clip sigue guardado: Ctrl+Z lo recupera
+                    continue;
+                }
+
+                setClipSpan(p.clip, p.parts[0]);
+                layoutClip(p.clip);
+
+                if (p.newClip) {
+                    project.clips[p.newClip.id] = p.newClip;
+                    setClipSpan(p.newClip, p.parts[1]);
+                    placeClip(row, p.newClip);
+                    row.insertBefore(p.newClip.el, p.clip.el.nextSibling); // Queda justo después de su mitad izquierda
+                }
+            }
+        }
+        applied = true;
+
+        if (audioCtx) ensureAudioGraph(); // Conecta el audio de los fragmentos nuevos
+        commit();                         // Un solo paso de historial: Ctrl+Z deshace el corte completo
+    } catch (err) {
+        // Antes del paso 4 no se tocó nada: solo se descartan los <video> que se habían abierto
+        if (!applied) created.forEach(discardFragment);
+        if (err.message !== 'cancelado') {
+            console.error(err);
+            alert('No se pudo hacer el recorte. No se modificó nada.');
+        }
+    } finally {
+        renderFrozen = false;
+        trimBusy = false;
+        if (trimMode) trimBanner.textContent = TRIM_HINT;
+        if (currentProjectId) refreshPreview(); // Dibuja el resultado ya con todos los frames listos
+    }
+}
+
 // --- Inicio ---
 setTimelineWidth(500);
 updatePlayhead();
