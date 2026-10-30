@@ -958,3 +958,21 @@ body.trim-mode .ruler {
     z-index: 12; cursor: ew-resize; background: rgba(138, 215, 255, .45);
 }
 .image-resize-handle:hover { background: #8ad7ff; }
+/* --- Clips de Audio / Oscilogramas --- */
+.clip.audio-clip {
+    background-color: #1a1a2e;
+    border-color: #4dabf7;
+}
+
+.clip.audio-clip canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.clip.audio-clip .clip-badge {
+    color: #4dabf7;
+}
