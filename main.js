@@ -11,8 +11,14 @@ const AV_DELAY_PREVIEW = 0.2;   // al reproducir en el editor
 const AV_DELAY_EXPORT = 0.2;    // en el video exportado
 const FRAME_CAPTURE_MS = 30;    // cada cuánto se guarda un cuadro del retraso (~33 fps)
 
+// Audios (oscilogramas)
+const AUDIO_DEFAULT_COLOR = '#02f7c2';  // Color inicial del oscilograma (se cambia con clic derecho > Cambiar color)
+const PEAKS_PER_SEC = PX_PER_SEC;       // Columnas del oscilograma por segundo de audio
+const PEAKS_DECODE_RATE = 8000;         // Hz a los que se decodifica SOLO para dibujar la onda (ahorra RAM)
+const AUDIO_EXT = /\.(mp3|wav|wave|ogg|oga|opus|m4a|aac|flac|aif|aiff|amr)$/i;
+
 // Ajustes del chroma key
-const CHROMA_MIN_DIFF = 20;     // Diferencia mínima entre el canal clave y los demás
+const CHROMA_MIN_DIFF = 20;    // Diferencia mínima entre el canal clave y los demás
 const CHROMA_K1 = 0.22;         // Por debajo: opaco. Entre K1 y K2: semitransparente
 const CHROMA_K2 = 0.5;          // Por encima: totalmente transparente
 
@@ -99,9 +105,9 @@ function serializeRows() {
                 start: el._clip.start,
                 type: el._clip.type || 'video',
                 chroma: el._clip.chroma || 'none',
-                color: el._clip.color || '#4dabf7',
-                srcStart: el._clip.srcStart || 0,
-                duration: el._clip.duration,
+                color: el._clip.color,                // Color del oscilograma (solo audios)
+                srcStart: el._clip.srcStart || 0,     // Dónde empieza este fragmento dentro del archivo
+                duration: el._clip.duration,          // Cuánto dura (cambia al recortar)
                 muted: !!el._clip.muted,
                 locked: !!el._clip.locked
             }))
@@ -309,6 +315,7 @@ function buildRows(rowsData, project) {
             if (!clip) return;
             clip.start = c.start;
             if (c.chroma != null) clip.chroma = c.chroma;
+            if (c.color != null) clip.color = c.color;
             if (c.srcStart != null) clip.srcStart = c.srcStart;
             if (c.duration != null) clip.duration = c.duration;
             clip.muted = !!c.muted;
@@ -603,71 +610,119 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
-    <div class="context-menu-item" data-action="change-color" id="changeColorOption">Cambiar de color</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-separator"></div>
-    <div class="context-menu-item video-only" data-chroma="green">Quitar fondo verde</div>
-    <div class="context-menu-item video-only" data-chroma="blue">Quitar fondo azul</div>
-    <div class="context-menu-item video-only" data-chroma="checker">Quitar fondo a cuadros</div>
-    <div class="context-menu-item video-only" data-chroma="none">Quitar transparencia</div>
-    <div class="context-menu-item video-only" data-action="rethumb">Recargar fotogramas</div>
+    <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
+    <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
+    <div class="context-menu-item" data-chroma="checker">Quitar fondo a cuadros</div>
+    <div class="context-menu-item" data-chroma="none">Quitar transparencia</div>
+    <div class="context-menu-item" data-action="rethumb">Recargar fotogramas</div>
     <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
 `);
+let clipTarget = null;
+
+// --- Menú de audios (en lugar del menú de video: sin opciones de pantalla verde) ---
+const audioMenu = createMenu(`
+    <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
+    <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
+    <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
+    <div class="context-menu-item" data-action="color">Cambiar color<span class="menu-swatch"></span></div>
+    <div class="context-menu-item danger" data-action="delete">Borrar</div>
+`);
+
+function showAudioContextMenu(x, y, clip) {
+    audioMenu.querySelector('[data-action="toggle-mute"]').textContent = clip.muted ? 'Sonorizar' : 'Silenciar';
+    const lockItem = audioMenu.querySelector('[data-action="toggle-lock"]');
+    lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
+    audioMenu.querySelector('[data-action="trim-mode"]').textContent =
+        trimMode ? 'Salir del modo recortes' : 'Modo recortes';
+    audioMenu.querySelector('.menu-swatch').style.backgroundColor = clip.color || AUDIO_DEFAULT_COLOR;
+
+    // Con el audio bloqueado solo queda disponible "Desbloquear"
+    audioMenu.querySelectorAll('.context-menu-item').forEach(item => {
+        item.classList.toggle('disabled', !!clip.locked && item !== lockItem);
+    });
+    openMenu(audioMenu, x, y);
+}
+
+audioMenu.addEventListener('click', (e) => {
+    const item = e.target.closest('.context-menu-item');
+    if (!item || !clipTarget || item.classList.contains('disabled')) return;
+
+    const action = item.dataset.action;
+    if (action === 'toggle-mute') setClipMuted(clipTarget, !clipTarget.muted);
+    else if (action === 'toggle-lock') setClipLocked(clipTarget, !clipTarget.locked);
+    else if (action === 'trim-mode') toggleTrimMode();
+    else if (action === 'color') openAudioColorPicker(clipTarget, item);
+    else if (action === 'delete') deleteClip(clipTarget);
+});
+
+// Selector de color: un <input type="color"> invisible que se abre junto al menú.
+// En Chrome / Edge muestra el selector clásico (cuadro de color, barra de matiz y campo HEX).
+const audioColorInput = document.createElement('input');
+audioColorInput.type = 'color';
+audioColorInput.className = 'audio-color-input';
+audioColorInput.tabIndex = -1;
+document.body.appendChild(audioColorInput);
+
+let colorTarget = null;   // Audio al que se le está cambiando el color
+let colorBefore = null;   // Color que tenía al abrir el selector (para registrar un solo paso de historial)
+
+function openAudioColorPicker(clip, anchorEl) {
+    const r = anchorEl.getBoundingClientRect();
+    colorTarget = clip;
+    colorBefore = clip.color || AUDIO_DEFAULT_COLOR;
+    audioColorInput.value = colorBefore;
+    audioColorInput.style.left = `${Math.round(r.left)}px`;
+    audioColorInput.style.top = `${Math.round(r.bottom)}px`;
+    audioColorInput.click();
+}
+
+function setAudioColor(clip, color) {
+    if (clip.type !== 'audio' || clip.locked) return;
+    clip.color = color;
+    if (clip.el) clip.el.style.setProperty('--audio-color', color);
+    drawClipFilmstrip(clip); // Repinta el oscilograma con el color nuevo
+}
+
+audioColorInput.addEventListener('input', () => {
+    if (colorTarget) setAudioColor(colorTarget, audioColorInput.value); // Se ve en vivo mientras eliges
+});
+
+audioColorInput.addEventListener('change', () => {
+    if (!colorTarget) return;
+    setAudioColor(colorTarget, audioColorInput.value);
+    if (colorTarget.color !== colorBefore) commit(); // Ctrl+Z devuelve el color anterior
+    colorBefore = colorTarget.color;
+    audioColorInput.blur(); // Que la barra espaciadora vuelva a reproducir / pausar
+});
 
 function showClipContextMenu(x, y, clip) {
     if (trimBusy) return;
     clipTarget = clip;
 
-    const isAudio = clip.type === 'audio';
+    // Los audios tienen su propio menú (sin pantalla verde ni fotogramas)
+    if (clip.type === 'audio') { showAudioContextMenu(x, y, clip); return; }
+
     const isImage = clip.type === 'image';
-    const isVideo = clip.type === 'video' || !clip.type;
-
-    // Mostrar u ocultar opciones según el tipo de medio
-    clipMenu.querySelectorAll('.video-only').forEach(item => {
-        item.style.display = isVideo ? 'block' : 'none';
-    });
-    
-    document.getElementById('changeColorOption').style.display = isAudio ? 'block' : 'none';
-
+    clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
     const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
     const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
     muteItem.textContent = clip.muted ? 'Sonorizar' : 'Silenciar';
     lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
+    clipMenu.querySelector('[data-action="trim-mode"]').textContent =
+        trimMode ? 'Salir del modo recortes' : 'Modo recortes';
 
+    // Con el clip bloqueado solo queda disponible "Desbloquear"
+    clipMenu.querySelectorAll('.context-menu-item').forEach(item => {
+        item.classList.toggle('disabled', !!clip.locked && item !== lockItem);
+    });
+
+    clipMenu.querySelectorAll('[data-chroma]').forEach(item => {
+        item.classList.toggle('checked', item.dataset.chroma === clip.chroma);
+    });
     openMenu(clipMenu, x, y);
 }
-
-clipMenu.addEventListener('click', (e) => {
-    const item = e.target.closest('.context-menu-item');
-    if (!item || !clipTarget || item.classList.contains('disabled')) return;
-
-    if (item.dataset.action === 'change-color') {
-        hideMenus();
-        // Crear un input de color flotante dinámico (Selector de color)
-        const colorInput = document.createElement('input');
-        colorInput.type = 'color';
-        colorInput.value = clipTarget.color || '#4dabf7';
-        colorInput.style.position = 'fixed';
-        colorInput.style.left = '-9999px';
-        document.body.appendChild(colorInput);
-        
-        colorInput.addEventListener('input', (ev) => {
-            clipTarget.color = ev.target.value;
-            drawAudioWaveform(clipTarget);
-        });
-        colorInput.addEventListener('change', () => {
-            commit();
-            colorInput.remove();
-        });
-        colorInput.click();
-    } else if (item.dataset.action === 'toggle-mute') {
-        setClipMuted(clipTarget, !clipTarget.muted);
-    } else if (item.dataset.action === 'toggle-lock') {
-        setClipLocked(clipTarget, !clipTarget.locked);
-    } else if (item.dataset.action === 'delete') {
-        deleteClip(clipTarget);
-    }
-});
 
 clipMenu.addEventListener('click', (e) => {
     const item = e.target.closest('.context-menu-item');
@@ -702,11 +757,13 @@ fileInput.addEventListener('change', async () => {
 
     const failed = [];
     for (const file of files) {
-        const ok = file.type.startsWith('image/') ? await importImageFile(file) : file.type.startsWith('video/') ? await importVideoFile(file) : false;
+        const ok = file.type.startsWith('image/') ? await importImageFile(file)
+                 : isAudioFile(file) ? await importAudioFile(file)
+                 : file.type.startsWith('video/') ? await importVideoFile(file) : false;
         if (!ok) failed.push(file.name);
     }
     if (failed.length) {
-        alert(`No se pudieron cargar estos archivos. Comprueba que sean imágenes o videos compatibles:\n\n${failed.join('\n')}`);
+        alert(`No se pudieron cargar estos archivos. Comprueba que sean imágenes, videos o audios compatibles:\n\n${failed.join('\n')}`);
     }
 });
 
@@ -775,6 +832,245 @@ async function importImageFile(file) {
     commit();
     refreshPreview();
     return true;
+}
+
+// =====================================================================
+//  Audios
+//  - Se reproducen con su propio <audio> (clip.video guarda ese elemento, así el resto del editor
+//    —volumen, silencio, exportación, recortes— lo trata igual que el sonido de un video).
+//  - NUNCA se dibujan en la vista previa y la jerarquía de filas no los afecta: suenan siempre,
+//    aunque haya imágenes o videos encima.
+//  - El oscilograma se calcula UNA vez por archivo, en segundo plano, y lo comparten todos los
+//    fragmentos (cortar no recalcula nada). Se decodifica a 8 kHz y el audio decodificado se descarta
+//    al terminar: solo queda una lista de picos pequeña.
+// =====================================================================
+function isAudioFile(file) {
+    return file.type.startsWith('audio/') || (!file.type && AUDIO_EXT.test(file.name));
+}
+
+async function importAudioFile(file) {
+    const projectId = currentProjectId;
+    if (!projectId) return false;
+
+    const clip = await loadAudioClip(file);
+    if (!clip) return false;
+
+    // Si el usuario salió del proyecto mientras cargaba, se descarta
+    if (projectId !== currentProjectId) {
+        disposeClip(clip);
+        return true;
+    }
+
+    currentProject().clips[clip.id] = clip;
+    if (audioCtx) ensureAudioGraph(); // Si el audio ya está activo, conecta también el clip nuevo
+
+    // Fila vacía si hay; si no, se crea una nueva ABAJO (los audios no tapan ni se tapan: no hay capa visual)
+    const row = findEmptyRow() || createRowElement(false);
+    clip.start = 0;
+    placeClip(row, clip);
+    fitTimeline();
+    commit();
+
+    queueAudioPeaks(clip.source);
+    refreshPreview();
+    return true;
+}
+
+// Carga el archivo en un <audio> y devuelve el objeto clip (o null si falla)
+function loadAudioClip(file) {
+    return new Promise((resolve) => {
+        const url = URL.createObjectURL(file);
+        const audio = document.createElement('audio');
+        audio.preload = 'auto';
+
+        let settled = false;
+        let timer = 0;
+        const cleanup = () => {
+            clearTimeout(timer);
+            audio.removeEventListener('loadedmetadata', onMeta);
+            audio.removeEventListener('error', fail);
+        };
+        const fail = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            audio.removeAttribute('src');
+            audio.load();
+            URL.revokeObjectURL(url);
+            resolve(null);
+        };
+        const onMeta = () => {
+            if (settled) return;
+            if (!isFinite(audio.duration) || audio.duration <= 0) { fail(); return; }
+            settled = true;
+            cleanup();
+
+            const duration = audio.duration;
+            // Fuente compartida: los picos del oscilograma del archivo COMPLETO
+            const source = {
+                url,
+                name: file.name,
+                duration,
+                aspect: 1,
+                peaks: null,          // Float32Array [min0, max0, min1, max1, ...] a PEAKS_PER_SEC por segundo
+                peakGain: 1,          // Aumento para que el oscilograma se vea aunque el audio sea bajo
+                peaksBusy: false,     // Calculando (o en cola para calcular)
+                disposed: false,
+                clips: new Set()      // Todos los fragmentos que usan este archivo
+            };
+
+            resolve({
+                id: `audio_${Date.now()}_${++clipSeq}`,
+                type: 'audio',
+                name: file.name,
+                url,
+                video: audio,         // El <audio> ocupa el lugar del <video> para compartir toda la lógica de sonido
+                duration,
+                aspect: 1,
+                source,
+                srcStart: 0,
+                start: 0,
+                chroma: 'none',
+                chromaManual: true,
+                color: AUDIO_DEFAULT_COLOR,
+                muted: false,
+                locked: false,
+                el: null,
+                thumbs: null,
+                thumbCtx: null,
+                thumbKey: '',
+                disposed: false,
+                badge: null
+            });
+        };
+
+        timer = setTimeout(fail, 15000);
+        audio.addEventListener('loadedmetadata', onMeta);
+        audio.addEventListener('error', fail);
+        audio.src = url;
+    });
+}
+
+// --- Oscilograma ---------------------------------------------------------
+let peaksQueue = Promise.resolve();
+
+function queueAudioPeaks(source) {
+    if (source.peaksBusy || source.peaks) return;
+    source.peaksBusy = true;
+    peaksQueue = peaksQueue
+        .then(() => buildAudioPeaks(source))
+        .catch((err) => console.warn('No se pudo generar el oscilograma de', source.name, err))
+        .finally(() => { source.peaksBusy = false; });
+}
+
+async function buildAudioPeaks(source) {
+    if (source.disposed) return;
+    await waitUntilIdle(source);                 // No compite con la reproducción ni con la exportación
+    if (source.disposed) return;
+
+    const Offline = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!Offline) return;
+
+    let bytes = await (await fetch(source.url)).arrayBuffer();
+    if (source.disposed) return;
+
+    // Decodifica a baja frecuencia: para dibujar la onda sobra y gasta mucha menos RAM
+    const decoder = new Offline(1, 1, PEAKS_DECODE_RATE);
+    let buffer = await new Promise((resolve, reject) => {
+        const p = decoder.decodeAudioData(bytes, resolve, reject);
+        if (p && p.catch) p.catch(reject);
+    });
+    bytes = null;
+    if (source.disposed) return;
+
+    const channels = [];
+    for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c));
+    const total = buffer.length;
+    const perCol = buffer.sampleRate / PEAKS_PER_SEC;     // Muestras que resume cada columna
+    const cols = Math.max(1, Math.ceil(total / perCol));
+    const peaks = new Float32Array(cols * 2);
+    let maxAbs = 0;
+
+    for (let i = 0; i < cols; i++) {
+        const a = Math.floor(i * perCol);
+        const b = Math.min(total, Math.max(a + 1, Math.floor((i + 1) * perCol)));
+        let mn = 0, mx = 0;
+        for (let c = 0; c < channels.length; c++) {
+            const d = channels[c];
+            for (let j = a; j < b; j++) {
+                const s = d[j];
+                if (s < mn) mn = s;
+                if (s > mx) mx = s;
+            }
+        }
+        peaks[i * 2] = mn;
+        peaks[i * 2 + 1] = mx;
+        if (-mn > maxAbs) maxAbs = -mn;
+        if (mx > maxAbs) maxAbs = mx;
+
+        // Cada tanto se cede el control para no congelar la página con archivos largos
+        if ((i & 4095) === 4095) {
+            await sleep(0);
+            if (source.disposed) return;
+        }
+    }
+
+    buffer = null; // Se suelta el audio decodificado: solo quedan los picos
+    source.peaks = peaks;
+    source.peakGain = Math.min(8, 0.95 / Math.max(maxAbs, 0.0001));
+    refreshFilmstrips(source); // Dibuja el oscilograma en todos los fragmentos de este audio
+}
+
+// Dibuja en el clip el tramo [srcStart, srcStart + duration] de los picos del archivo
+function drawAudioWaveform(clip, force = false) {
+    const cv = clip.thumbs;
+    const ctx = clip.thumbCtx;
+    const src = clip.source;
+    if (!cv || !ctx || !src) return;
+
+    const color = clip.color || AUDIO_DEFAULT_COLOR;
+    const key = `${clip.srcStart.toFixed(3)}|${clip.duration.toFixed(3)}|${color}|${src.peaks ? src.peaks.length : 0}`;
+    if (!force && clip.thumbKey === key) return;
+    clip.thumbKey = key;
+
+    const w = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
+    if (cv.width !== w) cv.width = w;           // (cambiar el ancho limpia el canvas)
+    if (cv.height !== THUMB_H) cv.height = THUMB_H;
+
+    const H = cv.height;
+    const mid = H / 2;
+    ctx.fillStyle = '#0b0b0b';
+    ctx.fillRect(0, 0, w, H);
+
+    // Línea central (el silencio)
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(0, Math.floor(mid), w, 1);
+    ctx.globalAlpha = 1;
+
+    const peaks = src.peaks;
+    if (!peaks) return; // Todavía calculando: por ahora solo la línea central
+
+    const n = peaks.length / 2;
+    const amp = (mid - 2) * src.peakGain;
+    const perCol = clip.duration / w;           // Segundos que abarca cada columna dibujada
+    for (let x = 0; x < w; x++) {
+        const t0 = clip.srcStart + x * perCol;
+        const i0 = Math.floor(t0 * PEAKS_PER_SEC);
+        if (i0 >= n) break;
+        const i1 = Math.min(n, Math.max(i0 + 1, Math.ceil((t0 + perCol) * PEAKS_PER_SEC)));
+
+        let mn = 0, mx = 0;
+        for (let i = i0; i < i1; i++) {
+            const lo = peaks[i * 2];
+            const hi = peaks[i * 2 + 1];
+            if (lo < mn) mn = lo;
+            if (hi > mx) mx = hi;
+        }
+        const top = Math.round(mid - mx * amp);
+        const bottom = Math.round(mid - mn * amp);
+        ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
+    }
 }
 
 // Al terminar un salto en el tiempo, repinta la vista previa si está en pausa
@@ -943,8 +1239,19 @@ function createClipElement(clip) {
 // Coloca el clip dentro de una fila en su posición de tiempo
 function placeClip(row, clip) {
     if (!clip.el) createClipElement(clip);
+    refreshClipLook(clip);
     layoutClip(clip);
     row.appendChild(clip.el);
+}
+
+// Aspecto del clip según sus datos: color/clase de los audios y etiqueta de estado.
+// (Se llama al colocar el clip, también al Deshacer / Rehacer, así todo queda al día.)
+function refreshClipLook(clip) {
+    if (clip.type === 'audio') {
+        clip.el.classList.add('audio-clip');
+        clip.el.style.setProperty('--audio-color', clip.color || AUDIO_DEFAULT_COLOR);
+    }
+    updateClipBadge(clip);
 }
 
 // Posición y ancho del clip en la línea de tiempo (y su tira de fotogramas)
@@ -959,6 +1266,7 @@ function drawClipFilmstrip(clip, force = false) {
     const cv = clip.thumbs;
     const ctx = clip.thumbCtx;
     if (!cv || !ctx) return;
+    if (clip.type === 'audio') { drawAudioWaveform(clip, force); return; }
     if (clip.type === 'image') {
         const w = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
         if (cv.width !== w) cv.width = w;
@@ -1016,6 +1324,7 @@ function updateClipBadge(clip) {
 
     clip.badge.textContent = parts.join(' · ');
     clip.el.classList.toggle('locked', !!clip.locked);
+    clip.el.classList.toggle('is-muted', !!clip.muted);
 }
 
 function setClipMuted(clip, muted) {
@@ -1444,7 +1753,7 @@ function hasUnreadyActiveClip() {
     forEachClipBottomUp((clip) => {
         const local = clock.t - clip.start;
         if (local < 0 || local >= clip.duration) return;
-        if (clip.type === 'image') return;
+        if (clip.type === 'image' || clip.type === 'audio') return;
         const v = clip.video;
         if (v.seeking || v.readyState < 2 || !v.videoWidth) unready = true;
     });
@@ -1523,6 +1832,9 @@ function renderComposite(ctx) {
     forEachClipBottomUp((clip) => {
         const local = clock.t - clip.start;
         if (local < 0 || local >= clip.duration) return;
+
+        // Los audios no se dibujan en la vista previa (solo se oyen); su fila no influye en nada
+        if (clip.type === 'audio') return;
 
         if (clip.type === 'image') {
             const img = clip.image;
@@ -1615,43 +1927,8 @@ function syncClips() {
     const tolerance = exporting ? 0.6 : DRIFT_TOLERANCE; // Al exportar se evitan saltos innecesarios
 
     for (const clip of Object.values(currentProject().clips)) {
-        // Ignorar si es una imagen
         if (clip.type === 'image') continue;
-
-        // --- MANEJO DE CLIPS DE AUDIO ---
-        if (clip.type === 'audio') {
-            const a = clip.audio;
-            if (!a || !clip.el || !clip.el.isConnected) {
-                if (a && !a.paused) a.pause();
-                continue;
-            }
-            const row = clip.el.parentElement;
-            const local = clock.t - clip.start;
-            const active = local >= 0 && local < clip.duration;
-            const srcT = (clip.srcStart || 0) + local;
-
-            if (!active) {
-                if (!a.paused) a.pause();
-                continue;
-            }
-
-            const silent = clip.muted || (row && row.classList.contains('muted'));
-            a.muted = masterMuted || silent;
-            a.volume = masterVolume;
-
-            if (clock.playing) {
-                if (Math.abs(a.currentTime - srcT) > tolerance) a.currentTime = srcT;
-                if (a.paused) a.play().catch(() => {});
-            } else {
-                if (!a.paused) a.pause();
-                if (Math.abs(a.currentTime - srcT) > 0.03) a.currentTime = srcT;
-            }
-            continue; // Pasamos al siguiente clip para que no intente ejecutar código de video
-        }
-
-        // --- MANEJO DE CLIPS DE VIDEO (Código original) ---
         const v = clip.video;
-        if (!v) continue;
 
         if (!clip.el || !clip.el.isConnected) { // Clip eliminado o fuera de pantalla
             if (!v.paused) v.pause();
@@ -2676,7 +2953,7 @@ function renderPreviewAtTime(targetT) {
             if (el._clip) {
                 const clip = el._clip;
                 const local = targetT - clip.start;
-                if (local >= 0 && local < clip.duration && clip.thumbs) {
+                if (local >= 0 && local < clip.duration && clip.thumbs && clip.type !== 'audio') {
                     const aspect = clip.aspect || (16 / 9);
                     const frameW = clip.thumbs.height * aspect;
                     const thumbX = (local / clip.duration) * Math.max(0, clip.thumbs.width - frameW);
@@ -2923,9 +3200,9 @@ function setClipSpan(clip, part) {
 }
 
 // <video> nuevo para un fragmento: espera a que tenga datos antes de devolverlo
-function openClipVideo(url) {
+function openClipVideo(url, isAudio = false) {
     return new Promise((resolve) => {
-        const v = document.createElement('video');
+        const v = document.createElement(isAudio ? 'audio' : 'video');
         v.preload = 'auto';
         v.playsInline = true;
 
@@ -2945,7 +3222,7 @@ function openClipVideo(url) {
                 resolve(null);
             }
         };
-        const onLoad = () => finish(!!v.videoWidth);
+        const onLoad = () => finish(isAudio || !!v.videoWidth); // Un audio no tiene videoWidth
         const onError = () => finish(false);
         const timer = setTimeout(() => finish(false), 20000);
 
@@ -2960,6 +3237,8 @@ function createFragmentClip(parent, video) {
     return {
         id: `clip_${Date.now()}_${++clipSeq}`,
         name: parent.name,
+        type: parent.type,       // 'audio' en los fragmentos de un audio
+        color: parent.color,     // Color del oscilograma
         url: parent.url,
         video,
         duration: 0,
@@ -3020,7 +3299,7 @@ async function applyTrim(t0, t1, rows) {
         for (const { plan } of plans) {
             for (const p of plan) {
                 if (p.kind !== 'split') continue;
-                const video = await openClipVideo(p.clip.url);
+                const video = await openClipVideo(p.clip.url, p.clip.type === 'audio');
                 if (!video) throw new Error('No se pudo abrir el video para el recorte');
                 p.newClip = createFragmentClip(p.clip, video);
                 created.push(p.newClip);
@@ -3093,167 +3372,7 @@ async function applyTrim(t0, t1, rows) {
         if (currentProjectId) refreshPreview(); // Dibuja el resultado ya con todos los frames listos
     }
 }
-async function importAudioFile(file) {
-    const projectId = currentProjectId;
-    if (!projectId || !file.type.startsWith('audio/')) return false;
 
-    const url = URL.createObjectURL(file);
-    const audio = document.createElement('audio');
-    audio.preload = 'auto';
-
-    const loaded = await new Promise(resolve => {
-        audio.onloadedmetadata = () => resolve(true);
-        audio.onerror = () => resolve(false);
-        audio.src = url;
-    });
-
-    if (!loaded || projectId !== currentProjectId) {
-        URL.revokeObjectURL(url);
-        return false;
-    }
-
-    const duration = audio.duration;
-
-    // Generar datos del oscilograma (ondas de audio)
-    let peaks = [];
-    try {
-        const arrayBuffer = await file.arrayBuffer();
-        const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
-        const rawData = audioBuffer.getChannelData(0);
-        const samples = 300;
-        const blockSz = Math.floor(rawData.length / samples);
-        for (let i = 0; i < samples; i++) {
-            let sum = 0;
-            for (let j = 0; j < blockSz; j++) {
-                sum += Math.abs(rawData[i * blockSz + j]);
-            }
-            peaks.push(sum / blockSz);
-        }
-        tempCtx.close();
-    } catch (e) {
-        for (let i = 0; i < 200; i++) peaks.push(Math.random() * 0.5 + 0.2);
-    }
-
-    const clip = {
-        id: `audio_${Date.now()}_${++clipSeq}`,
-        type: 'audio',
-        name: file.name,
-        url,
-        audio,
-        duration,
-        srcStart: 0,
-        start: 0,
-        color: '#4dabf7',
-        peaks,
-        muted: false,
-        locked: false,
-        el: null,
-        thumbs: null,
-        thumbCtx: null,
-        badge: null
-    };
-
-    currentProject().clips[clip.id] = clip;
-    if (audioCtx) ensureAudioGraph();
-
-    const row = findEmptyRow() || createRowElement(true);
-    placeClip(row, clip);
-    fitTimeline();
-    commit();
-    refreshPreview();
-    return true;
-}
-
-// Actualizar el listener del input file para aceptar audio:
-fileInput.addEventListener('change', async () => {
-    const files = Array.from(fileInput.files);
-    fileInput.value = '';
-
-    const failed = [];
-    for (const file of files) {
-        const ok = file.type.startsWith('image/') ? await importImageFile(file)
-            : file.type.startsWith('audio/') ? await importAudioFile(file)
-            : file.type.startsWith('video/') ? await importVideoFile(file)
-            : false;
-        if (!ok) failed.push(file.name);
-    }
-    if (failed.length) {
-        alert(`No se pudieron cargar estos archivos:\n\n${failed.join('\n')}`);
-    }
-});
-function drawAudioWaveform(clip) {
-    const cv = clip.thumbs;
-    const ctx = clip.thumbCtx;
-    if (!cv || !ctx) return;
-
-    const w = Math.max(1, Math.ceil(clip.duration * PX_PER_SEC));
-    if (cv.width !== w) cv.width = w;
-    if (cv.height !== THUMB_H) cv.height = THUMB_H;
-
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, cv.width, cv.height);
-
-    const peaks = clip.peaks || [];
-    if (!peaks.length) return;
-
-    ctx.fillStyle = clip.color || '#4dabf7';
-    const barWidth = Math.max(1, w / peaks.length);
-    const centerY = THUMB_H / 2;
-
-    for (let i = 0; i < peaks.length; i++) {
-        const x = (i / peaks.length) * w;
-        const h = Math.max(2, peaks[i] * centerY * 1.8);
-        ctx.fillRect(x, centerY - h / 2, Math.max(1, barWidth - 0.5), h);
-    }
-}
-
-// En la función createClipElement, añadir soporte para tipo 'audio':
-function createClipElement(clip) {
-    const el = document.createElement('div');
-    el.className = 'clip';
-    if (clip.type === 'audio') el.classList.add('audio-clip');
-    if (clip.type === 'image') el.classList.add('image-clip');
-    el.title = clip.name;
-    el._clip = clip;
-    clip.el = el;
-    if (clip.source && clip.source.clips) clip.source.clips.add(clip);
-
-    const thumbs = document.createElement('canvas');
-    thumbs.width = 1;
-    thumbs.height = THUMB_H;
-    clip.thumbs = thumbs;
-    clip.thumbCtx = thumbs.getContext('2d', { alpha: false });
-    clip.thumbKey = '';
-
-    const label = document.createElement('span');
-    label.className = 'clip-label';
-    label.textContent = clip.name;
-
-    const badge = document.createElement('span');
-    badge.className = 'clip-badge';
-    clip.badge = badge;
-
-    el.append(thumbs, label, badge);
-
-    if (clip.type === 'audio') {
-        drawAudioWaveform(clip);
-    } else if (clip.type === 'image' && clip.image) {
-        // ... lógica existente de imagen ...
-    }
-
-    updateClipBadge(clip);
-    layoutClip(clip);
-    setupClipDrag(clip);
-
-    el.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        showClipContextMenu(e.clientX, e.clientY, clip);
-    });
-
-    return el;
-}
 // --- Inicio ---
 setTimelineWidth(500);
 updatePlayhead();
