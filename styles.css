@@ -958,21 +958,38 @@ body.trim-mode .ruler {
     z-index: 12; cursor: ew-resize; background: rgba(138, 215, 255, .45);
 }
 .image-resize-handle:hover { background: #8ad7ff; }
-/* --- Clips de Audio / Oscilogramas --- */
+
+/* --- Clips de audio (oscilogramas) --- */
 .clip.audio-clip {
-    background-color: #1a1a2e;
-    border-color: #4dabf7;
+    background-color: #0b0b0b;
+}
+/* El borde toma el color elegido (mientras se arrastra o es inválido manda el borde normal) */
+.clip.audio-clip:not(.dragging):not(.invalid) {
+    border-color: var(--audio-color, #02f7c2);
+}
+.clip.audio-clip .clip-badge { color: var(--audio-color, #02f7c2); }
+/* Audio silenciado: la onda se ve apagada */
+.clip.audio-clip.is-muted canvas { opacity: 0.3; }
+
+/* Muestra del color actual en el menú "Cambiar color" */
+.menu-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-left: 10px;
+    border: 1px solid #ffffff;
+    vertical-align: middle;
 }
 
-.clip.audio-clip canvas {
-    position: absolute;
-    top: 0;
+/* Selector de color nativo: invisible, solo sirve para abrir el selector junto al menú */
+.audio-color-input {
+    position: fixed;
     left: 0;
-    width: 100%;
-    height: 100%;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    border: 0;
+    opacity: 0;
     pointer-events: none;
-}
-
-.clip.audio-clip .clip-badge {
-    color: #4dabf7;
 }
