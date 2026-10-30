@@ -606,11 +606,11 @@ const clipMenu = createMenu(`
     <div class="context-menu-separator"></div>
     <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
     <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
+    <div class="context-menu-item" data-chroma="checker">Quitar fondo a cuadros</div>
     <div class="context-menu-item" data-chroma="none">Quitar transparencia</div>
     <div class="context-menu-item" data-action="rethumb">Recargar fotogramas</div>
     <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
 `);
-
 let clipTarget = null;
 
 function showClipContextMenu(x, y, clip) {
@@ -978,6 +978,7 @@ function updateClipBadge(clip) {
     const parts = [];
     if (clip.chroma === 'green') parts.push('Pantalla verde');
     if (clip.chroma === 'blue') parts.push('Pantalla azul');
+    if (clip.chroma === 'checker') parts.push('Fondo a cuadros');
     if (clip.muted) parts.push('Silenciado');
     if (clip.locked) parts.push('Bloqueado');
 
@@ -1533,26 +1534,39 @@ function applyChromaKey(ctx, x, y, w, h, mode) {
     const img = ctx.getImageData(x, y, w, h);
     const d = img.data;
 
-    const kc = mode === 'green' ? 1 : 2;   // Canal clave
-    const o1 = 0;                          // Rojo siempre es "otro" canal
-    const o2 = mode === 'green' ? 2 : 1;   // El restante
+    if (mode === 'checker') {
+        // Detecta y vuelve transparentes los cuadros grises claros y blancos del fondo falso
+        for (let i = 0; i < d.length; i += 4) {
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            // Si el color es casi neutro (gris/blanco) y tiene alta luminosidad
+            if ((max - min < 15) && (max > 160)) {
+                d[i + 3] = 0; // Transparente
+            }
+        }
+    } else {
+        const kc = mode === 'green' ? 1 : 2;   
+        const o1 = 0;                          
+        const o2 = mode === 'green' ? 2 : 1;   
 
-    for (let i = 0; i < d.length; i += 4) {
-        const key = d[i + kc];
-        const a = d[i + o1];
-        const b = d[i + o2];
-        const other = a > b ? a : b;
-        const diff = key - other;
+        for (let i = 0; i < d.length; i += 4) {
+            const key = d[i + kc];
+            const a = d[i + o1];
+            const b = d[i + o2];
+            const other = a > b ? a : b;
+            const diff = key - other;
 
-        if (diff > CHROMA_MIN_DIFF) {
-            const k = diff / key;
-            if (k >= CHROMA_K2) {
-                d[i + 3] = 0;                                         // Fondo
-            } else {
-                if (k > CHROMA_K1) {
-                    d[i + 3] = d[i + 3] * (CHROMA_K2 - k) / (CHROMA_K2 - CHROMA_K1); // Borde suave
+            if (diff > CHROMA_MIN_DIFF) {
+                const k = diff / key;
+                if (k >= CHROMA_K2) {
+                    d[i + 3] = 0;                                         
+                } else {
+                    if (k > CHROMA_K1) {
+                        d[i + 3] = d[i + 3] * (CHROMA_K2 - k) / (CHROMA_K2 - CHROMA_K1); 
+                    }
+                    d[i + kc] = other;                                    
                 }
-                d[i + kc] = other;                                    // Quita el reflejo verde/azul
             }
         }
     }
