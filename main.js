@@ -99,8 +99,9 @@ function serializeRows() {
                 start: el._clip.start,
                 type: el._clip.type || 'video',
                 chroma: el._clip.chroma || 'none',
-                srcStart: el._clip.srcStart || 0,     // Dónde empieza este fragmento dentro del archivo
-                duration: el._clip.duration,          // Cuánto dura (cambia al recortar)
+                color: el._clip.color || '#4dabf7',
+                srcStart: el._clip.srcStart || 0,
+                duration: el._clip.duration,
                 muted: !!el._clip.muted,
                 locked: !!el._clip.locked
             }))
@@ -602,40 +603,71 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
+    <div class="context-menu-item" data-action="change-color" id="changeColorOption">Cambiar de color</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-separator"></div>
-    <div class="context-menu-item" data-chroma="green">Quitar fondo verde</div>
-    <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
-    <div class="context-menu-item" data-chroma="checker">Quitar fondo a cuadros</div>
-    <div class="context-menu-item" data-chroma="none">Quitar transparencia</div>
-    <div class="context-menu-item" data-action="rethumb">Recargar fotogramas</div>
+    <div class="context-menu-item video-only" data-chroma="green">Quitar fondo verde</div>
+    <div class="context-menu-item video-only" data-chroma="blue">Quitar fondo azul</div>
+    <div class="context-menu-item video-only" data-chroma="checker">Quitar fondo a cuadros</div>
+    <div class="context-menu-item video-only" data-chroma="none">Quitar transparencia</div>
+    <div class="context-menu-item video-only" data-action="rethumb">Recargar fotogramas</div>
     <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
 `);
-let clipTarget = null;
 
 function showClipContextMenu(x, y, clip) {
     if (trimBusy) return;
     clipTarget = clip;
 
+    const isAudio = clip.type === 'audio';
     const isImage = clip.type === 'image';
-    clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
+    const isVideo = clip.type === 'video' || !clip.type;
+
+    // Mostrar u ocultar opciones según el tipo de medio
+    clipMenu.querySelectorAll('.video-only').forEach(item => {
+        item.style.display = isVideo ? 'block' : 'none';
+    });
+    
+    document.getElementById('changeColorOption').style.display = isAudio ? 'block' : 'none';
+
     const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
     const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
     muteItem.textContent = clip.muted ? 'Sonorizar' : 'Silenciar';
     lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
-    clipMenu.querySelector('[data-action="trim-mode"]').textContent =
-        trimMode ? 'Salir del modo recortes' : 'Modo recortes';
 
-    // Con el clip bloqueado solo queda disponible "Desbloquear"
-    clipMenu.querySelectorAll('.context-menu-item').forEach(item => {
-        item.classList.toggle('disabled', !!clip.locked && item !== lockItem);
-    });
-
-    clipMenu.querySelectorAll('[data-chroma]').forEach(item => {
-        item.classList.toggle('checked', item.dataset.chroma === clip.chroma);
-    });
     openMenu(clipMenu, x, y);
 }
+
+clipMenu.addEventListener('click', (e) => {
+    const item = e.target.closest('.context-menu-item');
+    if (!item || !clipTarget || item.classList.contains('disabled')) return;
+
+    if (item.dataset.action === 'change-color') {
+        hideMenus();
+        // Crear un input de color flotante dinámico (Selector de color)
+        const colorInput = document.createElement('input');
+        colorInput.type = 'color';
+        colorInput.value = clipTarget.color || '#4dabf7';
+        colorInput.style.position = 'fixed';
+        colorInput.style.left = '-9999px';
+        document.body.appendChild(colorInput);
+        
+        colorInput.addEventListener('input', (ev) => {
+            clipTarget.color = ev.target.value;
+            drawAudioWaveform(clipTarget);
+        });
+        colorInput.addEventListener('change', () => {
+            commit();
+            colorInput.remove();
+        });
+        colorInput.click();
+    } else if (item.dataset.action === 'toggle-mute') {
+        setClipMuted(clipTarget, !clipTarget.muted);
+    } else if (item.dataset.action === 'toggle-lock') {
+        setClipLocked(clipTarget, !clipTarget.locked);
+    } else if (item.dataset.action === 'delete') {
+        deleteClip(clipTarget);
+    }
+});
 
 clipMenu.addEventListener('click', (e) => {
     const item = e.target.closest('.context-menu-item');
@@ -1583,8 +1615,43 @@ function syncClips() {
     const tolerance = exporting ? 0.6 : DRIFT_TOLERANCE; // Al exportar se evitan saltos innecesarios
 
     for (const clip of Object.values(currentProject().clips)) {
+        // Ignorar si es una imagen
         if (clip.type === 'image') continue;
+
+        // --- MANEJO DE CLIPS DE AUDIO ---
+        if (clip.type === 'audio') {
+            const a = clip.audio;
+            if (!a || !clip.el || !clip.el.isConnected) {
+                if (a && !a.paused) a.pause();
+                continue;
+            }
+            const row = clip.el.parentElement;
+            const local = clock.t - clip.start;
+            const active = local >= 0 && local < clip.duration;
+            const srcT = (clip.srcStart || 0) + local;
+
+            if (!active) {
+                if (!a.paused) a.pause();
+                continue;
+            }
+
+            const silent = clip.muted || (row && row.classList.contains('muted'));
+            a.muted = masterMuted || silent;
+            a.volume = masterVolume;
+
+            if (clock.playing) {
+                if (Math.abs(a.currentTime - srcT) > tolerance) a.currentTime = srcT;
+                if (a.paused) a.play().catch(() => {});
+            } else {
+                if (!a.paused) a.pause();
+                if (Math.abs(a.currentTime - srcT) > 0.03) a.currentTime = srcT;
+            }
+            continue; // Pasamos al siguiente clip para que no intente ejecutar código de video
+        }
+
+        // --- MANEJO DE CLIPS DE VIDEO (Código original) ---
         const v = clip.video;
+        if (!v) continue;
 
         if (!clip.el || !clip.el.isConnected) { // Clip eliminado o fuera de pantalla
             if (!v.paused) v.pause();
@@ -3026,7 +3093,167 @@ async function applyTrim(t0, t1, rows) {
         if (currentProjectId) refreshPreview(); // Dibuja el resultado ya con todos los frames listos
     }
 }
+async function importAudioFile(file) {
+    const projectId = currentProjectId;
+    if (!projectId || !file.type.startsWith('audio/')) return false;
 
+    const url = URL.createObjectURL(file);
+    const audio = document.createElement('audio');
+    audio.preload = 'auto';
+
+    const loaded = await new Promise(resolve => {
+        audio.onloadedmetadata = () => resolve(true);
+        audio.onerror = () => resolve(false);
+        audio.src = url;
+    });
+
+    if (!loaded || projectId !== currentProjectId) {
+        URL.revokeObjectURL(url);
+        return false;
+    }
+
+    const duration = audio.duration;
+
+    // Generar datos del oscilograma (ondas de audio)
+    let peaks = [];
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+        const rawData = audioBuffer.getChannelData(0);
+        const samples = 300;
+        const blockSz = Math.floor(rawData.length / samples);
+        for (let i = 0; i < samples; i++) {
+            let sum = 0;
+            for (let j = 0; j < blockSz; j++) {
+                sum += Math.abs(rawData[i * blockSz + j]);
+            }
+            peaks.push(sum / blockSz);
+        }
+        tempCtx.close();
+    } catch (e) {
+        for (let i = 0; i < 200; i++) peaks.push(Math.random() * 0.5 + 0.2);
+    }
+
+    const clip = {
+        id: `audio_${Date.now()}_${++clipSeq}`,
+        type: 'audio',
+        name: file.name,
+        url,
+        audio,
+        duration,
+        srcStart: 0,
+        start: 0,
+        color: '#4dabf7',
+        peaks,
+        muted: false,
+        locked: false,
+        el: null,
+        thumbs: null,
+        thumbCtx: null,
+        badge: null
+    };
+
+    currentProject().clips[clip.id] = clip;
+    if (audioCtx) ensureAudioGraph();
+
+    const row = findEmptyRow() || createRowElement(true);
+    placeClip(row, clip);
+    fitTimeline();
+    commit();
+    refreshPreview();
+    return true;
+}
+
+// Actualizar el listener del input file para aceptar audio:
+fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files);
+    fileInput.value = '';
+
+    const failed = [];
+    for (const file of files) {
+        const ok = file.type.startsWith('image/') ? await importImageFile(file)
+            : file.type.startsWith('audio/') ? await importAudioFile(file)
+            : file.type.startsWith('video/') ? await importVideoFile(file)
+            : false;
+        if (!ok) failed.push(file.name);
+    }
+    if (failed.length) {
+        alert(`No se pudieron cargar estos archivos:\n\n${failed.join('\n')}`);
+    }
+});
+function drawAudioWaveform(clip) {
+    const cv = clip.thumbs;
+    const ctx = clip.thumbCtx;
+    if (!cv || !ctx) return;
+
+    const w = Math.max(1, Math.ceil(clip.duration * PX_PER_SEC));
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== THUMB_H) cv.height = THUMB_H;
+
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+
+    const peaks = clip.peaks || [];
+    if (!peaks.length) return;
+
+    ctx.fillStyle = clip.color || '#4dabf7';
+    const barWidth = Math.max(1, w / peaks.length);
+    const centerY = THUMB_H / 2;
+
+    for (let i = 0; i < peaks.length; i++) {
+        const x = (i / peaks.length) * w;
+        const h = Math.max(2, peaks[i] * centerY * 1.8);
+        ctx.fillRect(x, centerY - h / 2, Math.max(1, barWidth - 0.5), h);
+    }
+}
+
+// En la función createClipElement, añadir soporte para tipo 'audio':
+function createClipElement(clip) {
+    const el = document.createElement('div');
+    el.className = 'clip';
+    if (clip.type === 'audio') el.classList.add('audio-clip');
+    if (clip.type === 'image') el.classList.add('image-clip');
+    el.title = clip.name;
+    el._clip = clip;
+    clip.el = el;
+    if (clip.source && clip.source.clips) clip.source.clips.add(clip);
+
+    const thumbs = document.createElement('canvas');
+    thumbs.width = 1;
+    thumbs.height = THUMB_H;
+    clip.thumbs = thumbs;
+    clip.thumbCtx = thumbs.getContext('2d', { alpha: false });
+    clip.thumbKey = '';
+
+    const label = document.createElement('span');
+    label.className = 'clip-label';
+    label.textContent = clip.name;
+
+    const badge = document.createElement('span');
+    badge.className = 'clip-badge';
+    clip.badge = badge;
+
+    el.append(thumbs, label, badge);
+
+    if (clip.type === 'audio') {
+        drawAudioWaveform(clip);
+    } else if (clip.type === 'image' && clip.image) {
+        // ... lógica existente de imagen ...
+    }
+
+    updateClipBadge(clip);
+    layoutClip(clip);
+    setupClipDrag(clip);
+
+    el.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showClipContextMenu(e.clientX, e.clientY, clip);
+    });
+
+    return el;
+}
 // --- Inicio ---
 setTimelineWidth(500);
 updatePlayhead();
