@@ -98,6 +98,7 @@ function serializeRows() {
     return Array.from(rowsContainer.children).map(row => ({
         muted: row.classList.contains('muted'),
         locked: row.classList.contains('locked'),
+        movable: row.classList.contains('movable'),   // "Habilitar desplazamiento"
         clips: Array.from(row.children)
             .filter(el => el._clip)
             .map(el => ({
@@ -109,7 +110,8 @@ function serializeRows() {
                 srcStart: el._clip.srcStart || 0,     // Dónde empieza este fragmento dentro del archivo
                 duration: el._clip.duration,          // Cuánto dura (cambia al recortar)
                 muted: !!el._clip.muted,
-                locked: !!el._clip.locked
+                locked: !!el._clip.locked,
+                tf: el._clip.tf ? { ...el._clip.tf } : null   // Posición / escala / rotación en la pantalla
             }))
     }));
 }
@@ -309,6 +311,7 @@ function buildRows(rowsData, project) {
         const row = createRowElement();
         if (data.muted) row.classList.add('muted');
         if (data.locked) row.classList.add('locked');
+        if (data.movable) row.classList.add('movable');
 
         (data.clips || []).forEach(c => {
             const clip = project.clips[c.id];
@@ -320,6 +323,7 @@ function buildRows(rowsData, project) {
             if (c.duration != null) clip.duration = c.duration;
             clip.muted = !!c.muted;
             clip.locked = !!c.locked;
+            clip.tf = c.tf ? { ...c.tf } : null;
             placeClip(row, clip);
         });
     });
@@ -525,6 +529,7 @@ const contextMenu = createMenu(`
     <div class="context-menu-item" id="muteRowOption">Silenciar</div>
     <div class="context-menu-item" id="unmuteRowOption">Sonorizar</div>
     <div class="context-menu-item" id="lockRowOption">Bloquear</div>
+    <div class="context-menu-item" id="moveRowOption">Habilitar desplazamiento</div>
     <div class="context-menu-item" id="trimModeOption">Modo recortes</div>
     <div class="context-menu-item danger" id="deleteRowOption">Borrar</div>
 `);
@@ -540,6 +545,8 @@ function showContextMenu(x, y, row) {
     document.getElementById('unmuteRowOption').style.display = muted ? 'block' : 'none';
     document.getElementById('lockRowOption').textContent =
         row.classList.contains('locked') ? 'Desbloquear' : 'Bloquear';
+    document.getElementById('moveRowOption').textContent =
+        row.classList.contains('movable') ? 'Deshabilitar desplazamiento' : 'Habilitar desplazamiento';
     document.getElementById('trimModeOption').textContent =
         trimMode ? 'Salir del modo recortes' : 'Modo recortes';
 
@@ -582,6 +589,16 @@ document.getElementById('trimModeOption').addEventListener('click', () => {
     toggleTrimMode();
 });
 
+// "Habilitar / Deshabilitar desplazamiento": las capas de esta fila se pueden mover, escalar y girar
+// en la pantalla completa de la vista previa
+document.getElementById('moveRowOption').addEventListener('click', () => {
+    if (rowTarget) {
+        rowTarget.classList.toggle('movable');
+        commit();
+        updateTransformOverlay();
+    }
+});
+
 // --- Menú de proyectos ---
 const projectContextMenu = createMenu(
     `<div class="context-menu-item danger" id="deleteProjectOption">Borrar proyecto</div>`
@@ -616,6 +633,7 @@ const clipMenu = createMenu(`
     <div class="context-menu-item" data-chroma="blue">Quitar fondo azul</div>
     <div class="context-menu-item" data-chroma="checker">Quitar fondo a cuadros</div>
     <div class="context-menu-item" data-chroma="none">Quitar transparencia</div>
+    <div class="context-menu-item" data-action="reset-transform">Restablecer posición y tamaño</div>
     <div class="context-menu-item" data-action="rethumb">Recargar fotogramas</div>
     <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
 `);
@@ -736,6 +754,8 @@ clipMenu.addEventListener('click', (e) => {
         setClipLocked(clipTarget, !clipTarget.locked);
     } else if (item.dataset.action === 'trim-mode') {
         toggleTrimMode();
+    } else if (item.dataset.action === 'reset-transform') {
+        resetClipTransform(clipTarget);
     } else if (item.dataset.action === 'rethumb') {
         queueThumbnails(clipTarget);
     } else if (item.dataset.action === 'delete') {
@@ -1836,35 +1856,78 @@ function renderComposite(ctx) {
         // Los audios no se dibujan en la vista previa (solo se oyen); su fila no influye en nada
         if (clip.type === 'audio') return;
 
+        // Fuente a dibujar: la imagen o el cuadro actual del video (si todavía no hay cuadro listo, se omite)
+        let source;
         if (clip.type === 'image') {
             const img = clip.image;
             if (!img || !img.complete || !img.naturalWidth) return;
-            const scale = Math.min(canvasW / img.naturalWidth, canvasH / img.naturalHeight);
-            const w = Math.max(1, Math.round(img.naturalWidth * scale));
-            const h = Math.max(1, Math.round(img.naturalHeight * scale));
-            const x = Math.round((canvasW - w) / 2), y = Math.round((canvasH - h) / 2);
-            if (clip.chroma === 'none') ctx.drawImage(img, x, y, w, h);
-            else { sctx.clearRect(0, 0, canvasW, canvasH); sctx.drawImage(img, x, y, w, h); applyChromaKey(sctx, x, y, w, h, clip.chroma); ctx.drawImage(scratch, 0, 0); }
-            return;
-        }
-        const v = clip.video;
-        if (!v || v.readyState < 2 || !v.videoWidth) return;
-
-        const s = Math.min(canvasW / v.videoWidth, canvasH / v.videoHeight);
-        const w = Math.max(1, Math.round(v.videoWidth * s));
-        const h = Math.max(1, Math.round(v.videoHeight * s));
-        const x = Math.round((canvasW - w) / 2);
-        const y = Math.round((canvasH - h) / 2);
-
-        if (clip.chroma === 'none') {
-            ctx.drawImage(v, x, y, w, h);
+            source = img;
         } else {
-            sctx.clearRect(0, 0, canvasW, canvasH);
-            sctx.drawImage(v, x, y, w, h);
-            applyChromaKey(sctx, x, y, w, h, clip.chroma);
-            ctx.drawImage(scratch, 0, 0);
+            const v = clip.video;
+            if (!v || v.readyState < 2 || !v.videoWidth) return;
+            source = v;
         }
+
+        const fit = clipFit(clip, canvasW, canvasH);
+        if (!fit) return;
+        drawClipLayer(ctx, clip, source, fit, canvasW, canvasH);
     });
+}
+
+// Rectángulo (centrado y ajustado al lienzo) que ocupa la capa SIN ninguna transformación
+function clipFit(clip, canvasW, canvasH) {
+    let sw, sh;
+    if (clip.type === 'image') {
+        const img = clip.image;
+        if (!img || !img.naturalWidth) return null;
+        sw = img.naturalWidth; sh = img.naturalHeight;
+    } else {
+        const v = clip.video;
+        if (!v || !v.videoWidth) return null;
+        sw = v.videoWidth; sh = v.videoHeight;
+    }
+    const s = Math.min(canvasW / sw, canvasH / sh);
+    const w = Math.max(1, Math.round(sw * s));
+    const h = Math.max(1, Math.round(sh * s));
+    return { x: Math.round((canvasW - w) / 2), y: Math.round((canvasH - h) / 2), w, h };
+}
+
+// ¿La capa tiene posición, escala o rotación distintas a las originales?
+function hasTransform(t) {
+    return !!t && (t.x !== 0 || t.y !== 0 || t.r !== 0 || t.sx !== 1 || t.sy !== 1);
+}
+
+// Dibuja una capa (con su quitar-fondo y su transformación). Esto se usa tanto en la vista previa como
+// al exportar, así lo que ves en pantalla completa es exactamente lo que se guarda en el video.
+//   tf.x / tf.y  = desplazamiento del centro (fracción del ancho / alto del lienzo)
+//   tf.sx / tf.sy = escala horizontal / vertical (1 = tamaño original)
+//   tf.r         = rotación en grados
+function drawClipLayer(ctx, clip, source, fit, canvasW, canvasH) {
+    const { x, y, w, h } = fit;
+    const t = clip.tf;
+    const moved = hasTransform(t);
+
+    // Quitar fondo: se procesa primero en el lienzo auxiliar, en su posición normal
+    const keyed = clip.chroma !== 'none';
+    if (keyed) {
+        sctx.clearRect(0, 0, canvasW, canvasH);
+        sctx.drawImage(source, x, y, w, h);
+        applyChromaKey(sctx, x, y, w, h, clip.chroma);
+    }
+
+    if (!moved) {
+        if (keyed) ctx.drawImage(scratch, 0, 0);
+        else ctx.drawImage(source, x, y, w, h);
+        return;
+    }
+
+    ctx.save();
+    ctx.translate(x + w / 2 + t.x * canvasW, y + h / 2 + t.y * canvasH);
+    ctx.rotate(t.r * Math.PI / 180);
+    ctx.scale(t.sx, t.sy);
+    if (keyed) ctx.drawImage(scratch, x, y, w, h, -w / 2, -h / 2, w, h);
+    else ctx.drawImage(source, -w / 2, -h / 2, w, h);
+    ctx.restore();
 }
 
 function requestRender() {
@@ -2123,6 +2186,7 @@ function updateFullscreenUI() {
     fsSeekThumb.style.left = `${frac * 100}%`;
     fsTime.textContent = `${formatTime(clock.t)} / ${formatTime(end)}`;
     fsPlayBtn.textContent = clock.playing ? '❚❚' : '▶';
+    updateTransformOverlay(); // Mantiene la caja de selección sobre la capa elegida
 }
 
 function showFsControls() {
@@ -3248,6 +3312,7 @@ function createFragmentClip(parent, video) {
         start: 0,
         chroma: parent.chroma,
         chromaManual: parent.chromaManual,
+        tf: parent.tf ? { ...parent.tf } : null,   // Las dos mitades de un corte conservan la posición / tamaño
         muted: parent.muted,
         locked: false,
         el: null,
@@ -3372,6 +3437,291 @@ async function applyTrim(t0, t1, rows) {
         if (currentProjectId) refreshPreview(); // Dibuja el resultado ya con todos los frames listos
     }
 }
+
+// =====================================================================
+//  Mover, escalar y girar capas en PANTALLA COMPLETA
+//  - Fila → clic derecho → "Habilitar desplazamiento": las imágenes y videos de esa fila se pueden transformar.
+//  - En pantalla completa: clic sobre una capa para seleccionarla → aparece una caja con manillas:
+//      · arrastrar dentro de la caja ............ mover
+//      · 8 manillas azules ....................... cambiar el tamaño (las esquinas mantienen la proporción)
+//      · manilla ↻ (arriba a la derecha) ......... girar (con Shift: saltos de 15°)
+//      · doble clic .............................. volver a la posición / tamaño originales
+//  - Cada capa guarda su transformación en clip.tf y renderComposite() la dibuja, por eso lo que ves
+//    en pantalla completa es exactamente lo que se guarda en el video exportado.
+// =====================================================================
+const TF_IDENTITY = { x: 0, y: 0, sx: 1, sy: 1, r: 0 };
+const TF_MIN_SIZE = 8;     // Tamaño mínimo (en px del lienzo) al achicar una capa
+const TF_ROT_SNAP = 15;    // Grados de cada salto al girar con Shift
+
+let selectedClip = null;   // Capa seleccionada en la pantalla completa
+let tfDrag = null;         // Gesto en curso (mover / redimensionar / girar)
+
+// Capa transparente sobre la vista previa (solo se ve en pantalla completa) con la caja de selección
+const tfLayer = document.createElement('div');
+tfLayer.className = 'tf-layer';
+const tfBox = document.createElement('div');
+tfBox.className = 'tf-box';
+
+// [nombre, hx, hy, cursor]: hx / hy = lado de la caja donde está la manilla (-1 izquierda/arriba, 0 centro, 1 derecha/abajo)
+const TF_HANDLES = [
+    ['nw', -1, -1, 'nwse-resize'], ['n', 0, -1, 'ns-resize'], ['ne', 1, -1, 'nesw-resize'],
+    ['e', 1, 0, 'ew-resize'], ['se', 1, 1, 'nwse-resize'], ['s', 0, 1, 'ns-resize'],
+    ['sw', -1, 1, 'nesw-resize'], ['w', -1, 0, 'ew-resize']
+];
+for (const [name, hx, hy, cursor] of TF_HANDLES) {
+    const h = document.createElement('div');
+    h.className = 'tf-handle';
+    h.dataset.hx = hx;
+    h.dataset.hy = hy;
+    h.style.left = `${(hx + 1) * 50}%`;
+    h.style.top = `${(hy + 1) * 50}%`;
+    h.style.cursor = cursor;
+    tfBox.appendChild(h);
+}
+const tfRotate = document.createElement('div');
+tfRotate.className = 'tf-rotate';
+tfRotate.textContent = '↻';
+tfRotate.title = 'Girar (con Shift: saltos de 15°)';
+tfBox.appendChild(tfRotate);
+tfLayer.appendChild(tfBox);
+videoPlayerContainer.appendChild(tfLayer);
+
+function isClipActive(clip) {
+    const local = clock.t - clip.start;
+    return local >= 0 && local < clip.duration;
+}
+
+// Solo se pueden transformar imágenes / videos desbloqueados que estén en una fila con el desplazamiento habilitado
+function isClipEditable(clip) {
+    if (!clip || clip.type === 'audio' || clip.locked || !clip.el || !clip.el.isConnected) return false;
+    const row = clip.el.parentElement;
+    return !!row && row.classList.contains('movable') && !row.classList.contains('locked');
+}
+
+// Dónde y a qué escala se ve el lienzo dentro de la pantalla (el canvas se muestra con object-fit: contain)
+function previewMetrics() {
+    const cr = previewCanvas.getBoundingClientRect();
+    const k = Math.min(cr.width / previewCanvas.width, cr.height / previewCanvas.height) || 1;
+    return {
+        k,                                                        // píxeles de pantalla por píxel del lienzo
+        left: cr.left + (cr.width - previewCanvas.width * k) / 2, // esquina del lienzo en la pantalla
+        top: cr.top + (cr.height - previewCanvas.height * k) / 2
+    };
+}
+
+// Centro, medio ancho / medio alto y ángulo de la capa, en píxeles del lienzo
+function clipGeometry(clip) {
+    const cw = previewCanvas.width;
+    const ch = previewCanvas.height;
+    const fit = clipFit(clip, cw, ch);
+    if (!fit) return null;
+    const t = clip.tf || TF_IDENTITY;
+    return {
+        fit, t, cw, ch,
+        cx: fit.x + fit.w / 2 + t.x * cw,
+        cy: fit.y + fit.h / 2 + t.y * ch,
+        hw: fit.w * t.sx / 2,
+        hh: fit.h * t.sy / 2,
+        rad: t.r * Math.PI / 180
+    };
+}
+
+// Coloca (o esconde) la caja de selección sobre la capa elegida
+function updateTransformOverlay() {
+    const clip = selectedClip;
+    const visible = videoPlayerContainer.classList.contains('is-fullscreen') && !exporting && !trimMode &&
+        clip && isClipEditable(clip) && isClipActive(clip);
+    const g = visible ? clipGeometry(clip) : null;
+    if (!g) { tfBox.style.display = 'none'; return; }
+
+    const m = previewMetrics();
+    const lr = tfLayer.getBoundingClientRect();
+    const w = g.hw * 2 * m.k;
+    const h = g.hh * 2 * m.k;
+    tfBox.style.display = 'block';
+    tfBox.style.width = `${w}px`;
+    tfBox.style.height = `${h}px`;
+    tfBox.style.left = `${m.left - lr.left + g.cx * m.k - w / 2}px`;
+    tfBox.style.top = `${m.top - lr.top + g.cy * m.k - h / 2}px`;
+    tfBox.style.transform = `rotate(${g.t.r}deg)`;
+}
+
+// Capa transformable que está bajo el puntero (la fila de arriba es la capa de arriba)
+function hitTestClip(px, py) {
+    for (const row of Array.from(rowsContainer.children)) {
+        if (!row.classList.contains('movable') || row.classList.contains('locked')) continue;
+        for (const el of row.children) {
+            const clip = el._clip;
+            if (!clip || clip.type === 'audio' || clip.locked || !isClipActive(clip)) continue;
+            const g = clipGeometry(clip);
+            if (!g) continue;
+
+            // Se lleva el punto al sistema de la capa (sin rotación) y se compara con su tamaño
+            const dx = px - g.cx;
+            const dy = py - g.cy;
+            const cos = Math.cos(g.rad);
+            const sin = Math.sin(g.rad);
+            const lx = dx * cos + dy * sin;
+            const ly = -dx * sin + dy * cos;
+            if (Math.abs(lx) <= g.hw && Math.abs(ly) <= g.hh) return clip;
+        }
+    }
+    return null;
+}
+
+function resetClipTransform(clip) {
+    if (!clip || clip.locked || !clip.tf) return;
+    clip.tf = null;
+    commit();
+    refreshPreview();
+}
+
+// Cambia el tamaño arrastrando una manilla. El lado / esquina opuesto queda fijo.
+//   Esquinas (hx y hy ≠ 0): escala proporcional.   Lados (hx o hy = 0): se estira solo en ese eje.
+function resizeFromHandle(d, px, py) {
+    const g = d.g;
+    const t = d.clip.tf;
+    const cos = Math.cos(g.rad);
+    const sin = Math.sin(g.rad);
+    const w0 = g.hw * 2;
+    const h0 = g.hh * 2;
+
+    // Ancla (punto opuesto a la manilla) en el lienzo
+    const ax = -d.hx * g.hw;
+    const ay = -d.hy * g.hh;
+    const Ax = g.cx + ax * cos - ay * sin;
+    const Ay = g.cy + ax * sin + ay * cos;
+
+    // Puntero respecto al ancla, en el sistema de la capa (con su giro)
+    const rx = px - Ax;
+    const ry = py - Ay;
+    const lx = rx * cos + ry * sin;
+    const ly = -rx * sin + ry * cos;
+
+    let W = d.hx ? Math.max(TF_MIN_SIZE, d.hx * lx) : w0;
+    let H = d.hy ? Math.max(TF_MIN_SIZE, d.hy * ly) : h0;
+    if (d.hx && d.hy) {                       // Esquina: se conserva la proporción
+        const f = Math.max(W / w0, H / h0);
+        W = w0 * f;
+        H = h0 * f;
+    }
+
+    // Nuevo centro = ancla + media caja nueva (girada)
+    const offX = d.hx * W / 2;
+    const offY = d.hy * H / 2;
+    const ncx = Ax + offX * cos - offY * sin;
+    const ncy = Ay + offX * sin + offY * cos;
+
+    t.sx = W / g.fit.w;
+    t.sy = H / g.fit.h;
+    t.x = (ncx - (g.fit.x + g.fit.w / 2)) / g.cw;
+    t.y = (ncy - (g.fit.y + g.fit.h / 2)) / g.ch;
+}
+
+function onTfMove(ev) {
+    const d = tfDrag;
+    if (!d) return;
+
+    const m = previewMetrics();
+    const px = (ev.clientX - m.left) / m.k;
+    const py = (ev.clientY - m.top) / m.k;
+    const t = d.clip.tf;
+
+    if (d.mode === 'move') {
+        t.x = d.start.x + (px - d.px0) / d.g.cw;
+        t.y = d.start.y + (py - d.py0) / d.g.ch;
+    } else if (d.mode === 'rotate') {
+        let r = d.start.r + (Math.atan2(py - d.g.cy, px - d.g.cx) - d.a0) * 180 / Math.PI;
+        if (ev.shiftKey) r = Math.round(r / TF_ROT_SNAP) * TF_ROT_SNAP;
+        t.r = r;
+    } else {
+        resizeFromHandle(d, px, py);
+    }
+
+    updateTransformOverlay();
+    requestRender();
+}
+
+function onTfUp() {
+    window.removeEventListener('pointermove', onTfMove);
+    window.removeEventListener('pointerup', onTfUp);
+    window.removeEventListener('pointercancel', onTfUp);
+
+    const d = tfDrag;
+    tfDrag = null;
+    if (!d) return;
+
+    const clip = d.clip;
+    if (clip.tf) {
+        // El ángulo queda entre -180° y 180°
+        let r = ((clip.tf.r % 360) + 360) % 360;
+        if (r > 180) r -= 360;
+        clip.tf.r = r;
+        if (!hasTransform(clip.tf)) clip.tf = null; // Volvió a su estado original
+    }
+
+    // Un solo paso de historial por gesto (Ctrl+Z devuelve la capa a donde estaba)
+    if (JSON.stringify(clip.tf) !== JSON.stringify(d.before)) commit();
+    refreshPreview();
+}
+
+tfLayer.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || exporting || trimMode || trimBusy || !currentProjectId || tfDrag) return;
+    e.preventDefault();
+
+    const m = previewMetrics();
+    const px = (e.clientX - m.left) / m.k;
+    const py = (e.clientY - m.top) / m.k;
+
+    let mode = 'move';
+    let hx = 0;
+    let hy = 0;
+    const grip = e.target.closest('.tf-handle, .tf-rotate');
+
+    if (grip && isClipEditable(selectedClip)) {
+        if (grip.classList.contains('tf-rotate')) {
+            mode = 'rotate';
+        } else {
+            mode = 'resize';
+            hx = Number(grip.dataset.hx);
+            hy = Number(grip.dataset.hy);
+        }
+    } else {
+        selectedClip = hitTestClip(px, py);   // Clic en un espacio vacío = no hay selección
+        if (!selectedClip) { updateTransformOverlay(); return; }
+    }
+
+    const clip = selectedClip;
+    const g = clipGeometry(clip);
+    if (!g) return;
+
+    const before = clip.tf ? { ...clip.tf } : null;
+    if (!clip.tf) clip.tf = { ...TF_IDENTITY };
+
+    tfDrag = {
+        mode, clip, hx, hy, g, before,
+        start: { ...clip.tf },
+        px0: px, py0: py,
+        a0: Math.atan2(py - g.cy, px - g.cx)
+    };
+    updateTransformOverlay();
+
+    window.addEventListener('pointermove', onTfMove);
+    window.addEventListener('pointerup', onTfUp);
+    window.addEventListener('pointercancel', onTfUp);
+});
+
+// Doble clic sobre la capa seleccionada: vuelve a su posición y tamaño originales
+tfLayer.addEventListener('dblclick', (e) => {
+    if (exporting || trimMode || !isClipEditable(selectedClip)) return;
+    if (e.target.closest('.tf-handle, .tf-rotate')) return;
+    resetClipTransform(selectedClip);
+});
+
+// Al entrar / salir de pantalla completa o cambiar el tamaño de la ventana, la caja se recoloca
+document.addEventListener('fullscreenchange', () => { selectedClip = null; updateTransformOverlay(); });
+window.addEventListener('resize', updateTransformOverlay);
+if (window.ResizeObserver) new ResizeObserver(updateTransformOverlay).observe(videoPlayerContainer);
 
 // --- Inicio ---
 setTimelineWidth(500);
