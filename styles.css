@@ -993,3 +993,75 @@ body.trim-mode .ruler {
     opacity: 0;
     pointer-events: none;
 }
+
+/* --- Mover, escalar y girar capas (solo en pantalla completa) --- */
+
+/* Fila con el desplazamiento habilitado: borde celeste */
+.row-item.movable {
+    border-color: #8ad7ff;
+}
+
+/* Capa transparente sobre la vista previa; recibe los clics para elegir y arrastrar capas */
+.tf-layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;              /* Debajo de los controles (z-index 10) para que sus botones sigan funcionando */
+    display: none;
+    touch-action: none;
+    user-select: none;
+}
+
+.video-player-container.is-fullscreen .tf-layer {
+    display: block;
+}
+
+/* Caja de selección (gira junto con la capa) */
+.tf-box {
+    position: absolute;
+    display: none;
+    border: 1px dashed #38b6ff;
+    transform-origin: 50% 50%;
+    cursor: move;
+}
+
+.tf-handle {
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
+    border-radius: 50%;
+    background: #38b6ff;
+    border: 1px solid #ffffff;
+}
+
+.tf-handle:hover {
+    background: #ffffff;
+    border-color: #38b6ff;
+}
+
+/* Manilla de giro, arriba a la derecha (fuera de la caja) */
+.tf-rotate {
+    position: absolute;
+    top: -34px;
+    right: -34px;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #38b6ff;
+    font-size: 20px;
+    line-height: 1;
+    cursor: grab;
+}
+
+.tf-rotate:hover {
+    color: #ffffff;
+}
+
+.tf-rotate:active {
+    cursor: grabbing;
+}
