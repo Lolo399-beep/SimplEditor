@@ -196,6 +196,41 @@ h1 {
     font-size: 0.9rem;
 }
 
+/* --- Velocidad de reproducción (multiplicador) --- */
+.speed-btn {
+    background: transparent;
+    border: none;
+    color: #ffffff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1.05rem;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    padding: 6px 8px;
+    cursor: pointer;
+}
+
+.speed-btn:hover {
+    color: #8ad7ff;
+}
+
+.speed-input {
+    width: 72px;
+    height: 32px;
+    background-color: #000000;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    border-radius: 0;
+    text-align: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1rem;
+    outline: none;
+}
+
+.speed-input:focus {
+    border-color: #38b6ff;
+}
+
 /* --- Contenedor de la vista previa --- */
 .video-player-container {
     position: relative;
