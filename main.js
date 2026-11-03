@@ -11,6 +11,10 @@ const AV_DELAY_PREVIEW = 0.2;   // al reproducir en el editor
 const AV_DELAY_EXPORT = 0.2;    // en el video exportado
 const FRAME_CAPTURE_MS = 30;    // cada cuánto se guarda un cuadro del retraso (~33 fps)
 
+// Velocidad de reproducción (multiplicador que se escribe junto a los botones de reproducción)
+const SPEED_MIN = 0.25;         // Más lento: 0.25 = cuatro veces más lento
+const SPEED_MAX = 4;            // Más rápido: 4 = cuatro veces más rápido (fuera de 0.25–4 el navegador puede silenciar el audio)
+
 // Audios (oscilogramas)
 const AUDIO_DEFAULT_COLOR = '#02f7c2';  // Color inicial del oscilograma (se cambia con clic derecho > Cambiar color)
 const PEAKS_PER_SEC = PX_PER_SEC;       // Columnas del oscilograma por segundo de audio
@@ -47,6 +51,8 @@ const videoPlayerContainer = document.getElementById('videoPlayerContainer');
 const playBtn = document.getElementById('playBtn');
 const pauseBtn = document.getElementById('pauseBtn');
 const replayBtn = document.getElementById('replayBtn');
+const speedBtn = document.getElementById('speedBtn');
+const speedInput = document.getElementById('speedInput');
 const volumeBtn = document.getElementById('volumeBtn');
 const volumeSlider = document.getElementById('volumeSlider');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
@@ -75,6 +81,7 @@ const currentProject = () => projects[currentProjectId];
 const clock = { t: 0, playing: false, last: 0, raf: 0 };
 let masterVolume = 1;
 let masterMuted = false;
+let playbackSpeed = 1;     // Multiplicador de velocidad (1 = normal). Se guarda en cada proyecto y también se aplica al exportar
 let renderQueued = false;
 
 // Modo recortes
@@ -218,6 +225,7 @@ function openProjectView(projectId, pushToHistory = true) {
 
     loadProjectRows(project);
     recordState(); // Estado inicial
+    setPlaybackSpeed(project.speed || 1, false); // Cada proyecto recuerda su propia velocidad
 
     mainView.classList.add('hidden');
     projectDetailView.classList.remove('hidden');
@@ -1987,7 +1995,7 @@ function syncClips() {
 
     // Volumen general: solo afecta a los parlantes, nunca a lo que se graba al exportar
     if (speakerGain) speakerGain.gain.value = exporting ? 0 : (masterMuted ? 0 : masterVolume);
-    const tolerance = exporting ? 0.6 : DRIFT_TOLERANCE; // Al exportar se evitan saltos innecesarios
+    const tolerance = (exporting ? 0.6 : DRIFT_TOLERANCE) * Math.max(1, playbackSpeed); // A más velocidad, el desfase (en segundos del archivo) crece, así que se tolera más // Al exportar se evitan saltos innecesarios
 
     for (const clip of Object.values(currentProject().clips)) {
         if (clip.type === 'image') continue;
@@ -2011,6 +2019,9 @@ function syncClips() {
             }
             continue;
         }
+
+        // Velocidad: el video / audio se reproduce al multiplicador elegido (el audio conserva su tono)
+        if (v.playbackRate !== playbackSpeed) v.playbackRate = playbackSpeed;
 
         const silent = clip.muted || row.classList.contains('muted');
         if (clip.gainNode) {
@@ -2059,7 +2070,7 @@ function refreshPreview() {
 function tick(ts) {
     if (!clock.playing) return;
 
-    clock.t += Math.max(0, (ts - clock.last) / 1000);
+    clock.t += Math.max(0, (ts - clock.last) / 1000) * playbackSpeed; // La línea de tiempo avanza a la velocidad elegida
     clock.last = ts;
 
     const end = contentEnd();
@@ -2710,6 +2721,7 @@ exportBtn.addEventListener('click', async () => {
     if (!currentProjectId || exporting || trimBusy) return;
 
     const project = currentProject();
+    const exportSpeed = playbackSpeed; // Velocidad del archivo exportado, fijada una sola vez (no se puede cambiar mientras se graba)
     const exportEnd = contentEnd(); // Duración EXACTA del proyecto (segundos), fijada una sola vez
     if (exportEnd <= 0) {
         alert('El proyecto está vacío o no tiene duración.');
@@ -2872,7 +2884,7 @@ exportBtn.addEventListener('click', async () => {
                     return;
                 }
 
-                clock.t += Math.max(0, (now - clock.last) / 1000);
+                clock.t += Math.max(0, (now - clock.last) / 1000) * exportSpeed; // El reloj avanza a la velocidad elegida: el archivo dura exportEnd ÷ exportSpeed
                 clock.last = now;
                 showProgress();
 
@@ -2927,7 +2939,7 @@ exportBtn.addEventListener('click', async () => {
 
         await saveBlob(finalBlob, fileHandle, fileName);
         console.log(
-            `[Exportar] proyecto: ${exportEnd.toFixed(2)} s · grabado: ${(loopMs / 1000).toFixed(2)} s · ` +
+            `[Exportar] proyecto: ${exportEnd.toFixed(2)} s a ${formatSpeed(exportSpeed)} (esperado ${(exportEnd / exportSpeed).toFixed(2)} s) · grabado: ${(loopMs / 1000).toFixed(2)} s · ` +
             `${(finalBlob.size / 1048576).toFixed(1)} MB · ${recorder.mimeType || format.type}` +
             (finalBlob !== blob ? ' · duración corregida' : '')
         );
@@ -2939,7 +2951,7 @@ exportBtn.addEventListener('click', async () => {
         cleanup();
     }
 
-    if (ok) alert(`¡Video exportado con éxito!\nDuración: ${formatTime(exportEnd)}`);
+    if (ok) alert(`¡Video exportado con éxito!\nDuración: ${formatTime(exportEnd / exportSpeed)} (${formatSpeed(exportSpeed)})`);
 });
 // --- Control del Menú de Relación de Aspecto ---
 const aspectMenuBtn = document.getElementById('aspectMenuBtn');
@@ -3722,6 +3734,64 @@ tfLayer.addEventListener('dblclick', (e) => {
 document.addEventListener('fullscreenchange', () => { selectedClip = null; updateTransformOverlay(); });
 window.addEventListener('resize', updateTransformOverlay);
 if (window.ResizeObserver) new ResizeObserver(updateTransformOverlay).observe(videoPlayerContainer);
+
+// =====================================================================
+//  Velocidad de reproducción (multiplicador)
+//  - Clic en "x1.0" → se escribe el multiplicador (0.5 = la mitad de rápido, 2 = el doble) → Enter
+//    (Esc cancela). Acepta "1.5", "1,5", "x1.5" o "1.5x".
+//  - Se aplica a la vista previa y al video exportado: el archivo dura (duración del proyecto ÷ multiplicador).
+//  - Cada proyecto recuerda su propia velocidad. No se puede cambiar mientras se exporta.
+// =====================================================================
+function formatSpeed(s) {
+    return 'x' + s.toFixed(2).replace(/0$/, ''); // 1 → x1.0 · 1.5 → x1.5 · 0.25 → x0.25
+}
+
+// Lee lo que escribió el usuario; devuelve NaN si no hay un número válido
+function parseSpeed(text) {
+    return parseFloat(String(text).replace(',', '.').replace(/[^0-9.]/g, ''));
+}
+
+function setPlaybackSpeed(value, save = true) {
+    if (exporting) return;
+    let s = Number(value);
+    if (!isFinite(s) || s <= 0) s = playbackSpeed;
+    s = Math.min(SPEED_MAX, Math.max(SPEED_MIN, Math.round(s * 100) / 100));
+
+    playbackSpeed = s;
+    speedBtn.textContent = formatSpeed(s);
+    if (save && currentProjectId && projects[currentProjectId]) projects[currentProjectId].speed = s;
+    syncClips(); // Si se está reproduciendo, los videos cambian de ritmo al instante
+}
+
+function openSpeedEditor() {
+    if (!currentProjectId || exporting) return;
+    speedBtn.classList.add('hidden');
+    speedInput.classList.remove('hidden');
+    speedInput.value = String(playbackSpeed);
+    speedInput.focus();
+    speedInput.select();
+}
+
+// apply = true guarda lo escrito; false (Esc) lo descarta
+function closeSpeedEditor(apply) {
+    if (speedInput.classList.contains('hidden')) return;
+    const n = apply ? parseSpeed(speedInput.value) : NaN;
+
+    speedInput.classList.add('hidden'); // Primero se oculta: así el 'blur' que sigue no vuelve a entrar aquí
+    speedBtn.classList.remove('hidden');
+    speedInput.blur();
+
+    if (!isNaN(n)) setPlaybackSpeed(n);
+}
+
+speedBtn.addEventListener('click', openSpeedEditor);
+
+speedInput.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // Que Espacio, Ctrl+Z, etc. no actúen sobre el editor mientras se escribe
+    if (e.key === 'Enter') { e.preventDefault(); closeSpeedEditor(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeSpeedEditor(false); }
+});
+speedInput.addEventListener('blur', () => closeSpeedEditor(true));
 
 // --- Inicio ---
 setTimelineWidth(500);
