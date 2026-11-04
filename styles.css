@@ -1134,3 +1134,78 @@ body.trim-mode .ruler {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.85rem;
 }
+/* --- Barra de Búsqueda y Resultados (Estilo Imagen Conceptual) --- */
+.main-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 40px;
+}
+
+.main-header h1 {
+    margin-bottom: 0;
+}
+
+.search-container {
+    position: relative;
+    width: 250px;
+}
+
+.search-bar {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid #ffffff;
+    padding-bottom: 2px;
+}
+
+.search-icon {
+    font-size: 0.9rem;
+    margin-right: 8px;
+    user-select: none;
+}
+
+.search-bar input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #ffffff;
+    font-family: inherit;
+    font-size: 1rem;
+    width: 100%;
+}
+
+/* El desplegable del cuadrado gris */
+.search-results-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    width: 250px;
+    min-height: 200px;
+    max-height: 350px;
+    background-color: #333333; /* Fondo gris oscuro */
+    border: 1px solid #ffffff;
+    z-index: 100;
+    margin-top: 5px;
+    overflow-y: auto;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+    padding: 8px 0;
+}
+
+.search-result-item {
+    padding: 8px 12px;
+    color: #ffffff;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background-color 0.15s ease;
+}
+
+.search-result-item:hover {
+    background-color: #4f4f4f;
+}
+
+.no-results {
+    padding: 12px;
+    color: #aaaaaa;
+    font-size: 0.85rem;
+    text-align: center;
+}
