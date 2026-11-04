@@ -3868,6 +3868,62 @@ speedInput.addEventListener('keydown', (e) => {
 });
 speedInput.addEventListener('blur', () => closeSpeedEditor(true));
 
+// =====================================================================
+//  Lógica de Búsqueda de Proyectos
+// =====================================================================
+const searchInput = document.getElementById('searchInput');
+const searchResults = document.getElementById('searchResults');
+
+// Filtrar y mostrar los resultados en el cuadrado gris
+function updateSearchResults() {
+    const query = searchInput.value.trim().toLowerCase();
+    searchResults.innerHTML = '';
+
+    if (query === '') {
+        searchResults.classList.add('hidden');
+        return;
+    }
+
+    const matchingProjects = Object.values(projects).filter(p => 
+        p.name.toLowerCase().includes(query)
+    );
+
+    if (matchingProjects.length === 0) {
+        const noRes = document.createElement('div');
+        noRes.className = 'no-results';
+        noRes.textContent = 'No se encontraron proyectos';
+        searchResults.appendChild(noRes);
+    } else {
+        matchingProjects.forEach(project => {
+            const item = document.createElement('div');
+            item.className = 'search-result-item';
+            item.textContent = `- ${project.name}`;
+            
+            // Al hacer clic en el resultado del cuadro gris, se abre el proyecto
+            item.addEventListener('click', () => {
+                openProjectView(project.id, true);
+                searchResults.classList.add('hidden');
+                searchInput.value = '';
+            });
+
+            searchResults.appendChild(item);
+        });
+    }
+
+    searchResults.classList.remove('hidden');
+}
+
+// Eventos del buscador
+searchInput.addEventListener('input', updateSearchResults);
+searchInput.addEventListener('focus', updateSearchResults);
+
+// Ocultar resultados si se hace clic fuera del contenedor
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.search-container')) {
+        searchResults.classList.add('hidden');
+    }
+});
+
 // --- Inicio ---
 setTimelineWidth(500);
 updatePlayhead();
