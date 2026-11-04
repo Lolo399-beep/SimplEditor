@@ -1100,3 +1100,37 @@ body.trim-mode .ruler {
 .tf-rotate:active {
     cursor: grabbing;
 }
+
+/* --- Medidor de volumen de cada clip --- */
+.volume-popup {
+    position: fixed;
+    display: none;
+    z-index: 1001;
+    background-color: #000000;
+    border: 1px solid #ffffff;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.8);
+    padding: 10px 14px;
+}
+
+.volume-popup-title {
+    font-size: 0.85rem;
+    color: #cccccc;
+    margin-bottom: 8px;
+}
+
+.volume-popup-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.volume-popup .volume-slider {
+    width: 140px;
+}
+
+.volume-popup-value {
+    min-width: 42px;
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+}
