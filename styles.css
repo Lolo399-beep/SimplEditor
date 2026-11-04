@@ -1209,3 +1209,20 @@ body.trim-mode .ruler {
     font-size: 0.85rem;
     text-align: center;
 }
+/* --- Miniatura de proyecto --- */
+.project-box {
+    position: relative;
+    overflow: hidden;          /* Recorta la imagen con los bordes redondeados del cuadrado */
+}
+
+.project-thumb {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;         /* Llena todo el cuadrado. Usa "contain" si quieres ver la imagen entera */
+    display: block;
+    pointer-events: none;      /* El clic derecho sigue llegando al cuadrado */
+    user-select: none;
+}
