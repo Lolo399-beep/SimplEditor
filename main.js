@@ -610,22 +610,93 @@ document.getElementById('moveRowOption').addEventListener('click', () => {
 });
 
 // --- Menú de proyectos ---
-const projectContextMenu = createMenu(
-    `<div class="context-menu-item danger" id="deleteProjectOption">Borrar proyecto</div>`
-);
+const projectContextMenu = createMenu(`
+    <div class="context-menu-item" id="setThumbOption">Poner miniatura</div>
+    <div class="context-menu-item" id="removeThumbOption">Quitar miniatura</div>
+    <div class="context-menu-item danger" id="deleteProjectOption">Borrar proyecto</div>
+`);
 
 let projectToDeleteId = null;
 let cardToDelete = null;
 
+// Selector de archivos (oculto) para elegir la miniatura
+const thumbInput = document.createElement('input');
+thumbInput.type = 'file';
+thumbInput.accept = 'image/*';
+thumbInput.hidden = true;
+document.body.appendChild(thumbInput);
+
+let thumbTargetId = null;    // Proyecto al que se le está poniendo la miniatura
+let thumbTargetBox = null;   // Su cuadrado en la vista principal
+
 function showProjectContextMenu(x, y, projectId, cardElement) {
     projectToDeleteId = projectId;
     cardToDelete = cardElement;
+    // "Quitar miniatura" solo aparece si el proyecto ya tiene una
+    document.getElementById('removeThumbOption').style.display =
+        projects[projectId].thumbUrl ? 'block' : 'none';
     openMenu(projectContextMenu, x, y);
 }
 
+function setProjectThumbnail(projectId, box, file) {
+    const project = projects[projectId];
+    if (!project || !box) return;
+
+    if (project.thumbUrl) URL.revokeObjectURL(project.thumbUrl); // Libera la anterior
+    project.thumbUrl = URL.createObjectURL(file);
+
+    let img = box.querySelector('.project-thumb');
+    if (!img) {
+        img = document.createElement('img');
+        img.className = 'project-thumb';
+        img.alt = '';
+        img.draggable = false;
+        box.appendChild(img);
+    }
+    img.src = project.thumbUrl;
+}
+
+function removeProjectThumbnail(projectId, box) {
+    const project = projects[projectId];
+    if (!project) return;
+
+    if (project.thumbUrl) URL.revokeObjectURL(project.thumbUrl);
+    project.thumbUrl = null;
+
+    const img = box && box.querySelector('.project-thumb');
+    if (img) img.remove();
+}
+
+// Clic derecho > "Poner miniatura": abre el explorador de archivos
+document.getElementById('setThumbOption').addEventListener('click', () => {
+    if (!projectToDeleteId || !cardToDelete) return;
+    thumbTargetId = projectToDeleteId;
+    thumbTargetBox = cardToDelete.querySelector('.project-box');
+    thumbInput.click();
+});
+
+thumbInput.addEventListener('change', () => {
+    const file = thumbInput.files[0];
+    thumbInput.value = ''; // Permite volver a elegir el mismo archivo
+    if (!file || !thumbTargetId || !projects[thumbTargetId]) return;
+
+    if (!file.type.startsWith('image/')) {
+        alert('Elige un archivo de imagen (JPG, PNG, WEBP, GIF...).');
+        return;
+    }
+    setProjectThumbnail(thumbTargetId, thumbTargetBox, file);
+});
+
+document.getElementById('removeThumbOption').addEventListener('click', () => {
+    if (!projectToDeleteId || !cardToDelete) return;
+    removeProjectThumbnail(projectToDeleteId, cardToDelete.querySelector('.project-box'));
+});
+
 document.getElementById('deleteProjectOption').addEventListener('click', () => {
     if (projectToDeleteId && cardToDelete) {
-        Object.values(projects[projectToDeleteId].clips).forEach(disposeClip);
+        const project = projects[projectToDeleteId];
+        if (project.thumbUrl) URL.revokeObjectURL(project.thumbUrl);
+        Object.values(project.clips).forEach(disposeClip);
         delete projects[projectToDeleteId];
         cardToDelete.remove();
         projectToDeleteId = null;
