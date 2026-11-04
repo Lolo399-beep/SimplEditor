@@ -117,6 +117,7 @@ function serializeRows() {
                 srcStart: el._clip.srcStart || 0,     // Dónde empieza este fragmento dentro del archivo
                 duration: el._clip.duration,          // Cuánto dura (cambia al recortar)
                 muted: !!el._clip.muted,
+                volume: el._clip.volume ?? 1,                 // Volumen individual del clip
                 locked: !!el._clip.locked,
                 tf: el._clip.tf ? { ...el._clip.tf } : null   // Posición / escala / rotación en la pantalla
             }))
@@ -330,6 +331,7 @@ function buildRows(rowsData, project) {
             if (c.srcStart != null) clip.srcStart = c.srcStart;
             if (c.duration != null) clip.duration = c.duration;
             clip.muted = !!c.muted;
+            if (c.volume != null) clip.volume = c.volume;
             clip.locked = !!c.locked;
             clip.tf = c.tf ? { ...c.tf } : null;
             placeClip(row, clip);
@@ -634,6 +636,7 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 // --- Menú de clips ---
 const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
+    <div class="context-menu-item" data-action="volume">Alterar volumen</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-separator"></div>
@@ -650,6 +653,7 @@ let clipTarget = null;
 // --- Menú de audios (en lugar del menú de video: sin opciones de pantalla verde) ---
 const audioMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
+    <div class="context-menu-item" data-action="volume">Alterar volumen</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-item" data-action="color">Cambiar color<span class="menu-swatch"></span></div>
@@ -679,6 +683,7 @@ audioMenu.addEventListener('click', (e) => {
     if (action === 'toggle-mute') setClipMuted(clipTarget, !clipTarget.muted);
     else if (action === 'toggle-lock') setClipLocked(clipTarget, !clipTarget.locked);
     else if (action === 'trim-mode') toggleTrimMode();
+    else if (action === 'volume') openVolumePopup(clipTarget, item);
     else if (action === 'color') openAudioColorPicker(clipTarget, item);
     else if (action === 'delete') deleteClip(clipTarget);
 });
@@ -723,6 +728,70 @@ audioColorInput.addEventListener('change', () => {
     audioColorInput.blur(); // Que la barra espaciadora vuelva a reproducir / pausar
 });
 
+// =====================================================================
+//  Volumen individual de cada clip (clic derecho > Alterar volumen)
+// =====================================================================
+const volumePopup = document.createElement('div');
+volumePopup.className = 'volume-popup';
+volumePopup.innerHTML = `
+    <div class="volume-popup-title">Alterar volumen</div>
+    <div class="volume-popup-row">
+        <input type="range" class="volume-slider" min="0" max="1" step="0.01" value="1">
+        <span class="volume-popup-value">100%</span>
+    </div>`;
+document.body.appendChild(volumePopup);
+
+const volumeRange = volumePopup.querySelector('input');
+const volumeLabel = volumePopup.querySelector('.volume-popup-value');
+let volumeTarget = null;   // Clip al que se le está cambiando el volumen
+let volumeBefore = 1;      // Volumen al abrir (para registrar un solo paso de historial)
+
+function openVolumePopup(clip, anchorEl) {
+    const r = anchorEl.getBoundingClientRect();
+    volumeTarget = clip;
+    volumeBefore = clip.volume ?? 1;
+    volumeRange.value = volumeBefore;
+    volumeLabel.textContent = `${Math.round(volumeBefore * 100)}%`;
+
+    volumePopup.style.display = 'block';
+    const w = volumePopup.offsetWidth;
+    const h = volumePopup.offsetHeight;
+    volumePopup.style.left = `${Math.max(0, Math.min(r.left, window.innerWidth - w - 4))}px`;
+    volumePopup.style.top = `${Math.max(0, Math.min(r.top, window.innerHeight - h - 4))}px`;
+}
+
+function closeVolumePopup() {
+    volumePopup.style.display = 'none';
+    volumeTarget = null;
+    volumeRange.blur(); // Que la barra espaciadora vuelva a reproducir / pausar
+}
+
+function setClipVolume(clip, vol) {
+    if (clip.locked || clip.type === 'image') return;
+    clip.volume = Math.min(1, Math.max(0, vol));
+    volumeLabel.textContent = `${Math.round(clip.volume * 100)}%`;
+    updateClipBadge(clip);
+    syncClips(); // Se oye al instante si se está reproduciendo
+}
+
+volumeRange.addEventListener('input', () => {
+    if (volumeTarget) setClipVolume(volumeTarget, parseFloat(volumeRange.value));
+});
+
+volumeRange.addEventListener('change', () => {
+    if (!volumeTarget) return;
+    if ((volumeTarget.volume ?? 1) !== volumeBefore) {
+        commit(); // Ctrl+Z devuelve el volumen anterior
+        volumeBefore = volumeTarget.volume ?? 1;
+    }
+    volumeRange.blur();
+});
+
+// Un clic fuera del medidor lo cierra
+document.addEventListener('pointerdown', (e) => {
+    if (volumePopup.style.display === 'block' && !volumePopup.contains(e.target)) closeVolumePopup();
+}, true);
+
 function showClipContextMenu(x, y, clip) {
     if (trimBusy) return;
     clipTarget = clip;
@@ -731,7 +800,7 @@ function showClipContextMenu(x, y, clip) {
     if (clip.type === 'audio') { showAudioContextMenu(x, y, clip); return; }
 
     const isImage = clip.type === 'image';
-    clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
+    clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="volume"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
     const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
     const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
     muteItem.textContent = clip.muted ? 'Sonorizar' : 'Silenciar';
@@ -758,6 +827,8 @@ clipMenu.addEventListener('click', (e) => {
         setClipChroma(clipTarget, item.dataset.chroma);
     } else if (item.dataset.action === 'toggle-mute') {
         setClipMuted(clipTarget, !clipTarget.muted);
+    } else if (item.dataset.action === 'volume') {
+        openVolumePopup(clipTarget, item);
     } else if (item.dataset.action === 'toggle-lock') {
         setClipLocked(clipTarget, !clipTarget.locked);
     } else if (item.dataset.action === 'trim-mode') {
@@ -1348,6 +1419,7 @@ function updateClipBadge(clip) {
     if (clip.chroma === 'blue') parts.push('Pantalla azul');
     if (clip.chroma === 'checker') parts.push('Fondo a cuadros');
     if (clip.muted) parts.push('Silenciado');
+    if (clip.volume != null && clip.volume < 1) parts.push(`Vol. ${Math.round(clip.volume * 100)}%`);
     if (clip.locked) parts.push('Bloqueado');
 
     clip.badge.textContent = parts.join(' · ');
@@ -2024,16 +2096,18 @@ function syncClips() {
         if (v.playbackRate !== playbackSpeed) v.playbackRate = playbackSpeed;
 
         const silent = clip.muted || row.classList.contains('muted');
+        const clipVol = clip.volume ?? 1; // Volumen individual del clip
         if (clip.gainNode) {
             // Con el audio mezclado por Web Audio, el silencio se controla con la ganancia del clip
-            const g = silent ? 0 : 1;
+            const g = silent ? 0 : clipVol;
             if (clip.gainNode.gain.value !== g) clip.gainNode.gain.value = g;
             if (v.muted) v.muted = false;
             if (v.volume !== 1) v.volume = 1;
         } else {
             const wantMuted = masterMuted || silent;
             if (v.muted !== wantMuted) v.muted = wantMuted;
-            if (v.volume !== masterVolume) v.volume = masterVolume;
+            const vol = masterVolume * clipVol;
+            if (v.volume !== vol) v.volume = vol;
         }
 
         if (clock.playing) {
@@ -3326,6 +3400,7 @@ function createFragmentClip(parent, video) {
         chromaManual: parent.chromaManual,
         tf: parent.tf ? { ...parent.tf } : null,   // Las dos mitades de un corte conservan la posición / tamaño
         muted: parent.muted,
+        volume: parent.volume ?? 1,   // Las dos mitades de un corte conservan el volumen
         locked: false,
         el: null,
         thumbs: null,
