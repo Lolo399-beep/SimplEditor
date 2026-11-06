@@ -105,7 +105,7 @@ function serializeRows() {
     return Array.from(rowsContainer.children).map(row => ({
         muted: row.classList.contains('muted'),
         locked: row.classList.contains('locked'),
-        movable: row.classList.contains('movable'),   // "Habilitar desplazamiento"
+        movable: row.classList.contains('movable'),
         clips: Array.from(row.children)
             .filter(el => el._clip)
             .map(el => ({
@@ -113,13 +113,15 @@ function serializeRows() {
                 start: el._clip.start,
                 type: el._clip.type || 'video',
                 chroma: el._clip.chroma || 'none',
-                color: el._clip.color,                // Color del oscilograma (solo audios)
-                srcStart: el._clip.srcStart || 0,     // Dónde empieza este fragmento dentro del archivo
-                duration: el._clip.duration,          // Cuánto dura (cambia al recortar)
+                filterType: el._clip.filterType || 'none',     // << NUEVO
+                intensity: el._clip.intensity ?? 100,           // << NUEVO
+                color: el._clip.color,
+                srcStart: el._clip.srcStart || 0,
+                duration: el._clip.duration,
                 muted: !!el._clip.muted,
-                volume: el._clip.volume ?? 1,                 // Volumen individual del clip
+                volume: el._clip.volume ?? 1,
                 locked: !!el._clip.locked,
-                tf: el._clip.tf ? { ...el._clip.tf } : null   // Posición / escala / rotación en la pantalla
+                tf: el._clip.tf ? { ...el._clip.tf } : null
             }))
     }));
 }
@@ -327,6 +329,8 @@ function buildRows(rowsData, project) {
             if (!clip) return;
             clip.start = c.start;
             if (c.chroma != null) clip.chroma = c.chroma;
+            if (c.filterType != null) clip.filterType = c.filterType;
+            if (c.intensity != null) clip.intensity = c.intensity;
             if (c.color != null) clip.color = c.color;
             if (c.srcStart != null) clip.srcStart = c.srcStart;
             if (c.duration != null) clip.duration = c.duration;
@@ -708,6 +712,7 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
     <div class="context-menu-item" data-action="volume">Alterar volumen</div>
+    <div class="context-menu-item" data-action="filter-popup">Filtros...</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-separator"></div>
@@ -719,6 +724,16 @@ const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="rethumb">Recargar fotogramas</div>
     <div class="context-menu-item danger" data-action="delete">Eliminar clip</div>
 `);
+
+clipMenu.addEventListener('click', (e) => {
+    const item = e.target.closest('.context-menu-item');
+    if (!item || !clipTarget || item.classList.contains('disabled')) return;
+
+    if (item.dataset.action === 'filter-popup') {
+        openFilterPopup(clipTarget, item);
+    }
+    // ... resto de manejadores del clipMenu existentes ...
+});
 let clipTarget = null;
 
 // --- Menú de audios (en lugar del menú de video: sin opciones de pantalla verde) ---
@@ -803,6 +818,102 @@ audioColorInput.addEventListener('change', () => {
 //  Volumen individual de cada clip (clic derecho > Alterar volumen)
 // =====================================================================
 const volumePopup = document.createElement('div');
+// Pop-up flotante para seleccionar filtro e intensidad
+const filterPopup = document.createElement('div');
+filterPopup.className = 'filter-popup hidden';
+filterPopup.innerHTML = `
+    <select class="filter-select" id="filterTypeSelect">
+        <option value="none">Sin filtro</option>
+        <option value="letterbox">Barras negras</option>
+        <option value="bw">Blanco y negro</option>
+        <option value="sepia">Sepia y Polaroid</option>
+        <option value="soft_vintage">Soft Vintage</option>
+        <option value="orange_teal">Orange & Teal</option>
+        <option value="moody_film">Moody Film</option>
+        <option value="retro_vhs">Retro y VHS</option>
+        <option value="bright">Bright</option>
+        <option value="glitch">Glitch</option>
+    </select>
+    <div class="filter-intensity-wrapper">
+        <input type="text" id="filterIntensityInput" class="filter-intensity-input" maxlength="4" value="100%">
+    </div>
+`;
+document.body.appendChild(filterPopup);
+
+const filterTypeSelect = document.getElementById('filterTypeSelect');
+const filterIntensityInput = document.getElementById('filterIntensityInput');
+
+let filterTargetClip = null;
+let filterBeforeType = 'none';
+let filterBeforeIntensity = 100;
+
+function openFilterPopup(clip, anchorEl) {
+    if (clip.locked) return;
+    filterTargetClip = clip;
+    filterBeforeType = clip.filterType || 'none';
+    filterBeforeIntensity = clip.intensity ?? 100;
+
+    filterTypeSelect.value = filterBeforeType;
+    filterIntensityInput.value = `${filterBeforeIntensity}%`;
+
+    const r = anchorEl.getBoundingClientRect();
+    filterPopup.classList.remove('hidden');
+    
+    const w = filterPopup.offsetWidth;
+    const h = filterPopup.offsetHeight;
+    filterPopup.style.left = `${Math.max(0, Math.min(r.right + 10, window.innerWidth - w - 10))}px`;
+    filterPopup.style.top = `${Math.max(0, Math.min(r.top, window.innerHeight - h - 10))}px`;
+}
+
+function closeFilterPopup() {
+    if (filterPopup.classList.contains('hidden')) return;
+    filterPopup.classList.add('hidden');
+    if (filterTargetClip) {
+        if ((filterTargetClip.filterType || 'none') !== filterBeforeType || 
+            (filterTargetClip.intensity ?? 100) !== filterBeforeIntensity) {
+            commit();
+        }
+    }
+    filterTargetClip = null;
+}
+
+// Clic fuera del cartel para cerrarlo
+document.addEventListener('pointerdown', (e) => {
+    if (!filterPopup.classList.contains('hidden') && 
+        !filterPopup.contains(e.target) && 
+        !e.target.closest('.context-menu')) {
+        closeFilterPopup();
+    }
+}, true);
+
+filterTypeSelect.addEventListener('change', () => {
+    if (!filterTargetClip) return;
+    filterTargetClip.filterType = filterTypeSelect.value;
+    updateClipBadge(filterTargetClip);
+    requestRender();
+});
+
+filterIntensityInput.addEventListener('input', () => {
+    if (!filterTargetClip) return;
+    let val = parseInt(filterIntensityInput.value.replace(/[^0-9]/g, ''), 10);
+    if (isNaN(val)) val = 0;
+    val = Math.min(100, Math.max(0, val));
+    
+    filterTargetClip.intensity = val;
+    requestRender();
+});
+
+filterIntensityInput.addEventListener('blur', () => {
+    if (!filterTargetClip) return;
+    filterIntensityInput.value = `${filterTargetClip.intensity ?? 100}%`;
+});
+
+filterIntensityInput.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+        filterIntensityInput.blur();
+    }
+});
 volumePopup.className = 'volume-popup';
 volumePopup.innerHTML = `
     <div class="volume-popup-title">Alterar volumen</div>
@@ -1489,6 +1600,7 @@ function updateClipBadge(clip) {
     if (clip.chroma === 'green') parts.push('Pantalla verde');
     if (clip.chroma === 'blue') parts.push('Pantalla azul');
     if (clip.chroma === 'checker') parts.push('Fondo a cuadros');
+    if (clip.filterType && clip.filterType !== 'none') parts.push(`Filtro: ${clip.filterType} (${clip.intensity ?? 100}%)`);
     if (clip.muted) parts.push('Silenciado');
     if (clip.volume != null && clip.volume < 1) parts.push(`Vol. ${Math.round(clip.volume * 100)}%`);
     if (clip.locked) parts.push('Bloqueado');
@@ -2057,9 +2169,8 @@ function drawClipLayer(ctx, clip, source, fit, canvasW, canvasH) {
     const { x, y, w, h } = fit;
     const t = clip.tf;
     const moved = hasTransform(t);
-
-    // Quitar fondo: se procesa primero en el lienzo auxiliar, en su posición normal
     const keyed = clip.chroma !== 'none';
+
     if (keyed) {
         sctx.clearRect(0, 0, canvasW, canvasH);
         sctx.drawImage(source, x, y, w, h);
@@ -2069,16 +2180,18 @@ function drawClipLayer(ctx, clip, source, fit, canvasW, canvasH) {
     if (!moved) {
         if (keyed) ctx.drawImage(scratch, 0, 0);
         else ctx.drawImage(source, x, y, w, h);
-        return;
+    } else {
+        ctx.save();
+        ctx.translate(x + w / 2 + t.x * canvasW, y + h / 2 + t.y * canvasH);
+        ctx.rotate(t.r * Math.PI / 180);
+        ctx.scale(t.sx, t.sy);
+        if (keyed) ctx.drawImage(scratch, x, y, w, h, -w / 2, -h / 2, w, h);
+        else ctx.drawImage(source, -w / 2, -h / 2, w, h);
+        ctx.restore();
     }
 
-    ctx.save();
-    ctx.translate(x + w / 2 + t.x * canvasW, y + h / 2 + t.y * canvasH);
-    ctx.rotate(t.r * Math.PI / 180);
-    ctx.scale(t.sx, t.sy);
-    if (keyed) ctx.drawImage(scratch, x, y, w, h, -w / 2, -h / 2, w, h);
-    else ctx.drawImage(source, -w / 2, -h / 2, w, h);
-    ctx.restore();
+    // << APLICA LOS FILTROS Y TONALIDADES >>
+    applyVideoFilters(ctx, clip, fit, canvasW, canvasH);
 }
 
 function requestRender() {
@@ -3994,6 +4107,107 @@ document.addEventListener('click', (e) => {
         searchResults.classList.add('hidden');
     }
 });
+function applyVideoFilters(ctx, clip, fit, canvasW, canvasH) {
+    const filter = clip.filterType || 'none';
+    const intensity = (clip.intensity ?? 100) / 100;
+
+    if (filter === 'none' || intensity <= 0) return;
+
+    const { x, y, w, h } = fit;
+
+    // 1. Barras negras (Letterbox cinematográfico)
+    if (filter === 'letterbox') {
+        const barHeight = (h * 0.12) * intensity;
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(x, y, w, barHeight);
+        ctx.fillRect(x, y + h - barHeight, w, barHeight);
+        return;
+    }
+
+    // 2. Filtros nativos mediante CSS Canvas Filter (B&W, Sepia, Bright)
+    if (filter === 'bw') {
+        ctx.filter = `grayscale(${intensity * 100}%)`;
+        ctx.drawImage(ctx.canvas, 0, 0);
+        ctx.filter = 'none';
+        return;
+    }
+
+    if (filter === 'sepia') {
+        ctx.filter = `sepia(${intensity * 100}%) contrast(${100 + intensity * 10}%) brightness(${100 + intensity * 5}%)`;
+        ctx.drawImage(ctx.canvas, 0, 0);
+        ctx.filter = 'none';
+        return;
+    }
+
+    if (filter === 'bright') {
+        ctx.filter = `brightness(${100 + intensity * 60}%) contrast(${100 + intensity * 15}%) saturate(${100 + intensity * 20}%)`;
+        ctx.drawImage(ctx.canvas, 0, 0);
+        ctx.filter = 'none';
+        return;
+    }
+
+    // 3. Filtros avanzados mediante manipulación directa de píxeles (Pixel Manipulation)
+    const imgData = ctx.getImageData(x, y, w, h);
+    const d = imgData.data;
+
+    for (let i = 0; i < d.length; i += 4) {
+        let r = d[i], g = d[i + 1], b = d[i + 2];
+
+        if (filter === 'soft_vintage') {
+            // Tonalidad cálida, tonos oscuros levantados
+            let targetR = r * 0.9 + 40;
+            let targetG = g * 0.85 + 20;
+            let targetB = b * 0.75 + 50;
+            d[i]     = r + (targetR - r) * intensity;
+            d[i + 1] = g + (targetG - g) * intensity;
+            d[i + 2] = b + (targetB - b) * intensity;
+        } 
+        else if (filter === 'orange_teal') {
+            // Sombras hacia cian (teal) y altas luces hacia naranja
+            let lum = (r + g + b) / 3;
+            let targetR = r > 128 ? Math.min(255, r + 35) : Math.max(0, r - 20);
+            let targetG = g > 128 ? Math.min(255, g + 10) : Math.min(255, g + 15);
+            let targetB = b > 128 ? Math.max(0, b - 30) : Math.min(255, b + 35);
+            d[i]     = r + (targetR - r) * intensity;
+            d[i + 1] = g + (targetG - g) * intensity;
+            d[i + 2] = b + (targetB - b) * intensity;
+        } 
+        else if (filter === 'moody_film') {
+            // Sombras frías, desaturado y contraste desvanecido
+            let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            let targetR = lum * 0.85 + 10;
+            let targetG = lum * 0.9 + 15;
+            let targetB = lum * 0.95 + 25;
+            d[i]     = r + (targetR - r) * intensity;
+            d[i + 1] = g + (targetG - g) * intensity;
+            d[i + 2] = b + (targetB - b) * intensity;
+        } 
+        else if (filter === 'retro_vhs') {
+            // Tonalidad magenta/verde con contraste vintage
+            let targetR = Math.min(255, r * 1.1 + 15);
+            let targetG = Math.max(0, g * 0.9 - 10);
+            let targetB = Math.min(255, b * 1.05 + 20);
+            d[i]     = r + (targetR - r) * intensity;
+            d[i + 1] = g + (targetG - g) * intensity;
+            d[i + 2] = b + (targetB - b) * intensity;
+        }
+    }
+
+    ctx.putImageData(imgData, x, y);
+
+    // 4. Efecto dinámico Glitch (Desplazamiento RGB / Artefactos)
+    if (filter === 'glitch') {
+        const shift = Math.round(12 * intensity);
+        if (shift > 0) {
+            ctx.save();
+            ctx.globalCompositeOperation = 'screen';
+            ctx.globalAlpha = 0.6 * intensity;
+            ctx.drawImage(ctx.canvas, x + shift, y, w, h, x, y, w, h);
+            ctx.drawImage(ctx.canvas, x - shift, y, w, h, x, y, w, h);
+            ctx.restore();
+        }
+    }
+}
 
 // --- Inicio ---
 setTimelineWidth(500);
