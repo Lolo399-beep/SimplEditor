@@ -1226,3 +1226,56 @@ body.trim-mode .ruler {
     pointer-events: none;      /* El clic derecho sigue llegando al cuadrado */
     user-select: none;
 }
+/* --- Ventana / Pop-up de Filtros (Estilo Conceptual) --- */
+.filter-popup {
+    position: fixed;
+    z-index: 1002;
+    background-color: #000000;
+    border: 1px solid #ffffff;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.9);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    color: #ffffff;
+}
+
+.filter-select {
+    background-color: #000000;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 4px 8px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    outline: none;
+    cursor: pointer;
+}
+
+.filter-select option {
+    background-color: #1a1a1a;
+    color: #ffffff;
+}
+
+.filter-intensity-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.filter-intensity-input {
+    width: 48px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #ffffff;
+    color: #ffffff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9rem;
+    text-align: right;
+    outline: none;
+}
+
+.filter-intensity-input:focus {
+    border-bottom-color: #38b6ff;
+}
