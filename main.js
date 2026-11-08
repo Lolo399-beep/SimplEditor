@@ -21,6 +21,33 @@ const PEAKS_PER_SEC = PX_PER_SEC;       // Columnas del oscilograma por segundo 
 const PEAKS_DECODE_RATE = 8000;         // Hz a los que se decodifica SOLO para dibujar la onda (ahorra RAM)
 const AUDIO_EXT = /\.(mp3|wav|wave|ogg|oga|opus|m4a|aac|flac|aif|aiff|amr)$/i;
 
+// Textos (se insertan con el botón "Insertar texto")
+const TEXT_SS = 2;                 // El texto se dibuja al doble de resolución y se reduce: se ve nítido al escalarlo
+const TEXT_MAX_SURFACE = 4096;     // Límite de tamaño (px) del lienzo de un texto
+const TEXT_MIN_SIZE = 8;           // Tamaño de letra mínimo (px, sobre una vista previa de 360 px de alto)
+const TEXT_MAX_SIZE = 400;         // Tamaño de letra máximo
+const TEXT_DEFAULTS = {
+    text: 'Texto', font: 'Arial, Helvetica, sans-serif', size: 48, color: '#ffffff',
+    bold: false, italic: false, hl: false, hlColor: '#000000', align: 'center'
+};
+// [nombre que se ve, valor CSS]. Son tipografías que trae Windows; si falta una, el navegador usa la siguiente de la lista
+const TEXT_FONTS = [
+    ['Arial', 'Arial, Helvetica, sans-serif'],
+    ['Arial Black', '"Arial Black", Arial, sans-serif'],
+    ['Impact', 'Impact, "Arial Narrow", sans-serif'],
+    ['Verdana', 'Verdana, Geneva, sans-serif'],
+    ['Tahoma', 'Tahoma, Geneva, sans-serif'],
+    ['Trebuchet MS', '"Trebuchet MS", sans-serif'],
+    ['Segoe UI', '"Segoe UI", sans-serif'],
+    ['Georgia', 'Georgia, serif'],
+    ['Times New Roman', '"Times New Roman", Times, serif'],
+    ['Palatino', '"Palatino Linotype", Palatino, serif'],
+    ['Courier New', '"Courier New", monospace'],
+    ['Lucida Console', '"Lucida Console", monospace'],
+    ['Comic Sans MS', '"Comic Sans MS", cursive'],
+    ['Brush Script', '"Brush Script MT", cursive']
+];
+
 // Ajustes del chroma key
 const CHROMA_MIN_DIFF = 20;    // Diferencia mínima entre el canal clave y los demás
 const CHROMA_K1 = 0.22;         // Por debajo: opaco. Entre K1 y K2: semitransparente
@@ -42,6 +69,7 @@ const timeDisplay = document.getElementById('timeDisplay');
 
 const importBtn = document.getElementById('importBtn');
 const fileInput = document.getElementById('fileInput');
+const addTextBtn = document.getElementById('addTextBtn');
 
 const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
@@ -121,7 +149,8 @@ function serializeRows() {
                 muted: !!el._clip.muted,
                 volume: el._clip.volume ?? 1,
                 locked: !!el._clip.locked,
-                tf: el._clip.tf ? { ...el._clip.tf } : null
+                tf: el._clip.tf ? { ...el._clip.tf } : null,
+                txt: el._clip.txt ? { ...el._clip.txt } : undefined   // Textos: contenido y formato
             }))
     }));
 }
@@ -201,6 +230,7 @@ redoBtn.addEventListener('click', redo);
 //  Navegación
 // =====================================================================
 function showMainView(pushToHistory = true) {
+    closeTextPopup();
     exitTrimMode();
     stopPlayback();
     saveCurrentProjectRows();
@@ -338,6 +368,7 @@ function buildRows(rowsData, project) {
             if (c.volume != null) clip.volume = c.volume;
             clip.locked = !!c.locked;
             clip.tf = c.tf ? { ...c.tf } : null;
+            if (c.txt) clip.txt = { ...c.txt };
             placeClip(row, clip);
         });
     });
@@ -815,6 +846,328 @@ audioColorInput.addEventListener('change', () => {
 });
 
 // =====================================================================
+//  Textos (clips de texto)
+//  - Botón "Insertar texto": crea un texto de 3 s en el cabezal, en una fila nueva ARRIBA de todo
+//    (esa fila queda con el desplazamiento habilitado: en pantalla completa se mueve / escala / gira).
+//  - Doble clic en el texto (o clic derecho > Editar texto...) abre el cartel de edición: contenido,
+//    tipografía, tamaño, color, negrita, cursiva, alineación y resaltado. Cada cambio se ve EN VIVO en la
+//    vista previa, sin volver a importar nada.
+//  - El texto se dibuja en un lienzo propio (al doble de resolución) y se compone igual que una imagen:
+//    por eso usa el mismo desplazamiento y también queda grabado en el video exportado.
+// =====================================================================
+const textMeasureCtx = document.createElement('canvas').getContext('2d');
+let textTargetClip = null;   // Texto que se está editando en el cartel
+let textBefore = '';         // Cómo estaba al abrir el cartel (para registrar un solo paso de historial)
+
+function textFontCss(t, px) {
+    return `${t.italic ? 'italic ' : ''}${t.bold ? 'bold ' : ''}${px}px ${t.font}`;
+}
+
+// Lienzo con el texto ya dibujado (a TEXT_SS veces su tamaño). Solo se vuelve a dibujar si algo cambió.
+function textSurface(clip) {
+    const t = clip.txt;
+    if (!t) return null;
+    const key = JSON.stringify(t);
+    if (clip.textCanvas && clip.textKey === key) return clip.textCanvas;
+
+    const lines = String(t.text).split('\n');
+    const size = Math.min(TEXT_MAX_SIZE, Math.max(TEXT_MIN_SIZE, Number(t.size) || TEXT_DEFAULTS.size));
+
+    const measure = (px) => {
+        textMeasureCtx.font = textFontCss(t, px);
+        let w = 0;
+        for (const line of lines) w = Math.max(w, textMeasureCtx.measureText(line).width);
+        const padX = px * 0.3;      // Margen lateral (también es lo que sobresale el resaltado)
+        const lineH = px * 1.25;    // Alto de cada línea
+        return { px, padX, lineH, w: Math.ceil(w + padX * 2), h: Math.ceil(lines.length * lineH) };
+    };
+
+    let ss = TEXT_SS;
+    let m = measure(size * ss);
+    if (m.w > TEXT_MAX_SURFACE || m.h > TEXT_MAX_SURFACE) {   // Texto enorme: se baja la resolución interna
+        ss *= Math.min(TEXT_MAX_SURFACE / m.w, TEXT_MAX_SURFACE / m.h);
+        m = measure(size * ss);
+    }
+
+    const cv = clip.textCanvas || (clip.textCanvas = document.createElement('canvas'));
+    cv.width = Math.max(1, Math.min(TEXT_MAX_SURFACE, m.w));    // (cambiar el tamaño limpia el lienzo)
+    cv.height = Math.max(1, Math.min(TEXT_MAX_SURFACE, m.h));
+    const ctx = cv.getContext('2d');
+    ctx.font = textFontCss(t, m.px);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = (t.align === 'left' || t.align === 'right') ? t.align : 'center';
+    const x = ctx.textAlign === 'left' ? m.padX : ctx.textAlign === 'right' ? m.w - m.padX : m.w / 2;
+
+    lines.forEach((line, i) => {
+        const cy = m.lineH * (i + 0.5);
+        if (t.hl && line.length) {   // Resaltado: una caja de color detrás de cada línea
+            const lw = ctx.measureText(line).width;
+            const bx = ctx.textAlign === 'left' ? x - m.padX
+                     : ctx.textAlign === 'right' ? x - lw - m.padX
+                     : x - lw / 2 - m.padX;
+            ctx.fillStyle = t.hlColor;
+            ctx.fillRect(bx, cy - m.lineH / 2, lw + m.padX * 2, m.lineH);
+        }
+        ctx.fillStyle = t.color;
+        ctx.fillText(line, x, cy);
+    });
+
+    clip.textKey = key;
+    clip.textSS = ss;
+    return cv;
+}
+
+// Miniatura del texto dentro de la fila (la primera línea, con su color / tipografía / resaltado)
+function drawTextStrip(clip, force = false) {
+    const cv = clip.thumbs;
+    const ctx = clip.thumbCtx;
+    const t = clip.txt;
+    if (!cv || !ctx || !t) return;
+
+    const w = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
+    const key = `${w}|${JSON.stringify(t)}`;
+    if (!force && clip.thumbKey === key) return;
+    clip.thumbKey = key;
+
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== THUMB_H) cv.height = THUMB_H;
+    ctx.fillStyle = '#4a4a4a';   // Gris medio: se lee tanto el texto claro como el oscuro
+    ctx.fillRect(0, 0, w, THUMB_H);
+
+    const first = String(t.text).split('\n')[0];
+    const cy = 22;
+    ctx.font = textFontCss(t, 24);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    if (t.hl && first.length) {
+        ctx.fillStyle = t.hlColor;
+        ctx.fillRect(6, cy - 16, ctx.measureText(first).width + 12, 32);
+    }
+    ctx.fillStyle = t.color;
+    ctx.fillText(first, 12, cy);
+}
+
+// La etiqueta del clip muestra la primera línea del texto
+function syncTextLabel(clip) {
+    const first = String((clip.txt && clip.txt.text) || '').split('\n')[0].trim();
+    clip.name = first || '(texto vacío)';
+    if (clip.label) clip.label.textContent = clip.name;
+    if (clip.el) clip.el.title = clip.name;
+}
+
+function createTextClip(start) {
+    return {
+        id: `text_${Date.now()}_${++clipSeq}`, type: 'text', name: TEXT_DEFAULTS.text,
+        url: null, image: null, video: null, duration: 3, aspect: 1, source: null,
+        srcStart: 0, start, chroma: 'none', chromaManual: true, muted: false, locked: false,
+        el: null, thumbs: null, thumbCtx: null, thumbKey: '', disposed: false, badge: null,
+        txt: { ...TEXT_DEFAULTS }, textCanvas: null, textKey: '', textSS: TEXT_SS
+    };
+}
+
+addTextBtn.addEventListener('click', () => {
+    if (!currentProjectId || trimBusy || exporting) return;
+    closeTextPopup();
+
+    const clip = createTextClip(Math.max(0, clock.t));
+    currentProject().clips[clip.id] = clip;
+
+    // Va en la fila de más arriba (así queda por encima de todo). Si esa fila ya tiene algo, se crea otra.
+    const top = rowsContainer.firstElementChild;
+    const row = (top && !top.classList.contains('locked') && !Array.from(top.children).some(el => el._clip))
+        ? top : createRowElement(true);
+    row.classList.add('movable');   // Para poder moverlo / escalarlo / girarlo en pantalla completa
+
+    placeClip(row, clip);
+    fitTimeline();
+    commit();
+    refreshPreview();
+    openTextPopup(clip);            // Se abre el cartel con el texto seleccionado: escribes y listo
+});
+
+// --- Cartel de edición ---------------------------------------------------
+const textPopup = document.createElement('div');
+textPopup.className = 'text-popup hidden';
+textPopup.innerHTML = `
+    <div class="text-popup-title">Editar texto</div>
+    <textarea id="textContentInput" rows="3" spellcheck="false" placeholder="Escribe tu texto"></textarea>
+    <div class="text-popup-row">
+        <select id="textFontSelect" class="filter-select" title="Tipografía"></select>
+        <label>Tamaño <input type="number" id="textSizeInput" class="text-size-input" min="${TEXT_MIN_SIZE}" max="${TEXT_MAX_SIZE}" step="1"></label>
+    </div>
+    <div class="text-popup-row">
+        <label>Color <input type="color" id="textColorInput"></label>
+        <button type="button" id="textBoldBtn" class="text-toggle" title="Negrita"><b>B</b></button>
+        <button type="button" id="textItalicBtn" class="text-toggle" title="Cursiva"><i>I</i></button>
+        <select id="textAlignSelect" class="filter-select" title="Alineación">
+            <option value="left">Izquierda</option>
+            <option value="center">Centro</option>
+            <option value="right">Derecha</option>
+        </select>
+    </div>
+    <div class="text-popup-row">
+        <label><input type="checkbox" id="textHlCheck"> Resaltado</label>
+        <input type="color" id="textHlColorInput" title="Color del resaltado">
+    </div>
+`;
+document.body.appendChild(textPopup);
+
+const textContentInput = document.getElementById('textContentInput');
+const textFontSelect = document.getElementById('textFontSelect');
+const textSizeInput = document.getElementById('textSizeInput');
+const textColorInput = document.getElementById('textColorInput');
+const textBoldBtn = document.getElementById('textBoldBtn');
+const textItalicBtn = document.getElementById('textItalicBtn');
+const textAlignSelect = document.getElementById('textAlignSelect');
+const textHlCheck = document.getElementById('textHlCheck');
+const textHlColorInput = document.getElementById('textHlColorInput');
+
+for (const [name, css] of TEXT_FONTS) {
+    const opt = document.createElement('option');
+    opt.value = css;
+    opt.textContent = name;
+    opt.style.fontFamily = css;
+    textFontSelect.appendChild(opt);
+}
+
+function fillTextControls(t) {
+    textContentInput.value = t.text;
+    textFontSelect.value = t.font;
+    textSizeInput.value = t.size;
+    textColorInput.value = t.color;
+    textBoldBtn.classList.toggle('active', !!t.bold);
+    textItalicBtn.classList.toggle('active', !!t.italic);
+    textAlignSelect.value = t.align;
+    textHlCheck.checked = !!t.hl;
+    textHlColorInput.value = t.hlColor;
+    textHlColorInput.disabled = !t.hl;
+}
+
+// Repinta todo lo que muestra el texto: etiqueta, miniatura de la fila y vista previa
+function applyTextChange(clip) {
+    syncTextLabel(clip);
+    drawClipFilmstrip(clip);
+    refreshPreview();
+}
+
+function readTextControls() {
+    const clip = textTargetClip;
+    if (!clip || clip.locked) return;
+    const t = clip.txt;
+
+    t.text = textContentInput.value;
+    t.font = textFontSelect.value || t.font;
+    const n = parseFloat(textSizeInput.value);   // Mientras escribes el tamaño, lo vacío se ignora
+    if (isFinite(n) && n > 0) t.size = Math.min(TEXT_MAX_SIZE, Math.max(TEXT_MIN_SIZE, Math.round(n)));
+    t.color = textColorInput.value;
+    t.align = textAlignSelect.value;
+    t.hl = textHlCheck.checked;
+    t.hlColor = textHlColorInput.value;
+    textHlColorInput.disabled = !t.hl;
+
+    applyTextChange(clip);
+}
+
+function toggleTextStyle(prop, btn) {
+    const clip = textTargetClip;
+    if (!clip || clip.locked) return;
+    clip.txt[prop] = !clip.txt[prop];
+    btn.classList.toggle('active', clip.txt[prop]);
+    applyTextChange(clip);
+}
+
+textPopup.addEventListener('input', readTextControls);
+textPopup.addEventListener('change', readTextControls);
+textBoldBtn.addEventListener('click', () => toggleTextStyle('bold', textBoldBtn));
+textItalicBtn.addEventListener('click', () => toggleTextStyle('italic', textItalicBtn));
+textSizeInput.addEventListener('blur', () => {
+    if (textTargetClip) textSizeInput.value = textTargetClip.txt.size;
+});
+
+// Dentro del cartel el teclado es solo para escribir (Espacio, Ctrl+Z, etc. no actúan sobre el editor)
+textPopup.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); closeTextPopup(); }
+});
+
+function openTextPopup(clip) {
+    if (!clip || clip.type !== 'text' || clip.locked || !clip.el || !clip.el.isConnected) return;
+    const row = clip.el.parentElement;
+    if (row && row.classList.contains('locked')) return;
+    if (textTargetClip && textTargetClip !== clip) closeTextPopup();
+
+    textTargetClip = clip;
+    textBefore = JSON.stringify(clip.txt);
+    fillTextControls(clip.txt);
+
+    textPopup.classList.remove('hidden');
+    const r = clip.el.getBoundingClientRect();
+    const w = textPopup.offsetWidth;
+    const h = textPopup.offsetHeight;
+    let top = r.bottom + 8;
+    if (top + h > window.innerHeight - 8) top = r.top - h - 8;   // Si no cabe abajo, va arriba del clip
+    textPopup.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+    textPopup.style.top = `${Math.max(8, Math.min(top, window.innerHeight - h - 8))}px`;
+
+    textContentInput.focus();
+    textContentInput.select();
+}
+
+function closeTextPopup() {
+    if (textPopup.classList.contains('hidden')) return;
+    if (document.activeElement && textPopup.contains(document.activeElement)) {
+        document.activeElement.blur();   // Que la barra espaciadora vuelva a reproducir / pausar
+    }
+    textPopup.classList.add('hidden');
+
+    const clip = textTargetClip;
+    textTargetClip = null;
+    if (clip && JSON.stringify(clip.txt) !== textBefore) commit();   // Ctrl+Z devuelve el texto anterior
+}
+
+// Un clic fuera del cartel lo cierra
+document.addEventListener('pointerdown', (e) => {
+    if (!textPopup.classList.contains('hidden') && !textPopup.contains(e.target) &&
+        !e.target.closest('.context-menu')) {
+        closeTextPopup();
+    }
+}, true);
+
+// --- Menú de textos (clic derecho) ----------------------------------------
+const textMenu = createMenu(`
+    <div class="context-menu-item" data-action="edit-text">Editar texto...</div>
+    <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
+    <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
+    <div class="context-menu-item" data-action="reset-transform">Restablecer posición y tamaño</div>
+    <div class="context-menu-item danger" data-action="delete">Borrar</div>
+`);
+
+function showTextContextMenu(x, y, clip) {
+    const lockItem = textMenu.querySelector('[data-action="toggle-lock"]');
+    lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
+    textMenu.querySelector('[data-action="trim-mode"]').textContent =
+        trimMode ? 'Salir del modo recortes' : 'Modo recortes';
+
+    // Con el texto bloqueado solo queda disponible "Desbloquear"
+    textMenu.querySelectorAll('.context-menu-item').forEach(item => {
+        item.classList.toggle('disabled', !!clip.locked && item !== lockItem);
+    });
+    openMenu(textMenu, x, y);
+}
+
+textMenu.addEventListener('click', (e) => {
+    const item = e.target.closest('.context-menu-item');
+    if (!item || !clipTarget || item.classList.contains('disabled')) return;
+
+    const action = item.dataset.action;
+    if (action === 'edit-text') openTextPopup(clipTarget);
+    else if (action === 'toggle-lock') setClipLocked(clipTarget, !clipTarget.locked);
+    else if (action === 'trim-mode') toggleTrimMode();
+    else if (action === 'reset-transform') resetClipTransform(clipTarget);
+    else if (action === 'delete') deleteClip(clipTarget);
+});
+
+// =====================================================================
 //  Volumen individual de cada clip (clic derecho > Alterar volumen)
 // =====================================================================
 const volumePopup = document.createElement('div');
@@ -980,6 +1333,7 @@ function showClipContextMenu(x, y, clip) {
 
     // Los audios tienen su propio menú (sin pantalla verde ni fotogramas)
     if (clip.type === 'audio') { showAudioContextMenu(x, y, clip); return; }
+    if (clip.type === 'text') { showTextContextMenu(x, y, clip); return; }
 
     const isImage = clip.type === 'image';
     clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="volume"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
@@ -1436,6 +1790,7 @@ function disposeClip(clip) {
     clip.disposed = true;
     if (clip.source) clip.source.disposed = true; // Corta la generación de miniaturas en curso
     if (clip.type === 'image') { if (clip.url) URL.revokeObjectURL(clip.url); return; }
+    if (clip.type === 'text') { clip.textCanvas = null; return; }
     if (clip.gainNode) { try { clip.gainNode.disconnect(); } catch (e) {} }
     if (clip.audioSource) { try { clip.audioSource.disconnect(); } catch (e) {} }
     clip.video.pause();
@@ -1464,6 +1819,7 @@ function createClipElement(clip) {
     const label = document.createElement('span');
     label.className = 'clip-label';
     label.textContent = clip.name;
+    clip.label = label;
 
     const badge = document.createElement('span');
     badge.className = 'clip-badge';
@@ -1484,8 +1840,8 @@ function createClipElement(clip) {
 
     setupClipDrag(clip);
 
-    // En las imágenes, arrastrar el borde derecho cambia su duración exacta.
-    if (clip.type === 'image') {
+    // En las imágenes y los textos, arrastrar el borde derecho cambia su duración exacta.
+    if (clip.type === 'image' || clip.type === 'text') {
         const resize = document.createElement('div');
         resize.className = 'image-resize-handle';
         resize.title = 'Arrastra para alargar o acortar la imagen';
@@ -1505,6 +1861,13 @@ function createClipElement(clip) {
             };
             window.addEventListener('pointermove', move);
             window.addEventListener('pointerup', up, { once: true });
+        });
+    }
+
+    if (clip.type === 'text') {
+        el.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            openTextPopup(clip);
         });
     }
 
@@ -1528,6 +1891,10 @@ function placeClip(row, clip) {
 // Aspecto del clip según sus datos: color/clase de los audios y etiqueta de estado.
 // (Se llama al colocar el clip, también al Deshacer / Rehacer, así todo queda al día.)
 function refreshClipLook(clip) {
+    if (clip.type === 'text') {
+        clip.el.classList.add('text-clip');
+        syncTextLabel(clip);
+    }
     if (clip.type === 'audio') {
         clip.el.classList.add('audio-clip');
         clip.el.style.setProperty('--audio-color', clip.color || AUDIO_DEFAULT_COLOR);
@@ -1548,6 +1915,7 @@ function drawClipFilmstrip(clip, force = false) {
     const ctx = clip.thumbCtx;
     if (!cv || !ctx) return;
     if (clip.type === 'audio') { drawAudioWaveform(clip, force); return; }
+    if (clip.type === 'text') { drawTextStrip(clip, force); return; }
     if (clip.type === 'image') {
         const w = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
         if (cv.width !== w) cv.width = w;
@@ -2036,7 +2404,7 @@ function hasUnreadyActiveClip() {
     forEachClipBottomUp((clip) => {
         const local = clock.t - clip.start;
         if (local < 0 || local >= clip.duration) return;
-        if (clip.type === 'image' || clip.type === 'audio') return;
+        if (clip.type === 'image' || clip.type === 'audio' || clip.type === 'text') return;
         const v = clip.video;
         if (v.seeking || v.readyState < 2 || !v.videoWidth) unready = true;
     });
@@ -2121,7 +2489,10 @@ function renderComposite(ctx) {
 
         // Fuente a dibujar: la imagen o el cuadro actual del video (si todavía no hay cuadro listo, se omite)
         let source;
-        if (clip.type === 'image') {
+        if (clip.type === 'text') {
+            source = textSurface(clip);
+            if (!source) return;
+        } else if (clip.type === 'image') {
             const img = clip.image;
             if (!img || !img.complete || !img.naturalWidth) return;
             source = img;
@@ -2139,6 +2510,15 @@ function renderComposite(ctx) {
 
 // Rectángulo (centrado y ajustado al lienzo) que ocupa la capa SIN ninguna transformación
 function clipFit(clip, canvasW, canvasH) {
+    // Texto: se ve a su tamaño de letra real (no se estira para llenar el lienzo como una imagen)
+    if (clip.type === 'text') {
+        const tc = textSurface(clip);
+        if (!tc) return null;
+        const k = canvasH / PREVIEW_H;
+        const tw = Math.max(1, Math.round(tc.width / clip.textSS * k));
+        const th = Math.max(1, Math.round(tc.height / clip.textSS * k));
+        return { x: Math.round((canvasW - tw) / 2), y: Math.round((canvasH - th) / 2), w: tw, h: th };
+    }
     let sw, sh;
     if (clip.type === 'image') {
         const img = clip.image;
@@ -2254,7 +2634,7 @@ function syncClips() {
     const tolerance = (exporting ? 0.6 : DRIFT_TOLERANCE) * Math.max(1, playbackSpeed); // A más velocidad, el desfase (en segundos del archivo) crece, así que se tolera más // Al exportar se evitan saltos innecesarios
 
     for (const clip of Object.values(currentProject().clips)) {
-        if (clip.type === 'image') continue;
+        if (clip.type === 'image' || clip.type === 'text') continue;
         const v = clip.video;
 
         if (!clip.el || !clip.el.isConnected) { // Clip eliminado o fuera de pantalla
@@ -2993,6 +3373,8 @@ exportBtn.addEventListener('click', async () => {
 
     exitTrimMode();
 
+    closeTextPopup();
+
     // 1. El audio se prepara DENTRO del clic (gesto del usuario); si no, el navegador lo deja en silencio
     ensureAudioGraph();
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
@@ -3287,6 +3669,12 @@ function renderPreviewAtTime(targetT) {
             if (el._clip) {
                 const clip = el._clip;
                 const local = targetT - clip.start;
+                if (local >= 0 && local < clip.duration && clip.type === 'text') {
+                    const surf = textSurface(clip);
+                    const fit = surf && clipFit(clip, canvasW, canvasH);
+                    if (fit) drawClipLayer(fsSeekCtx, clip, surf, fit, canvasW, canvasH);
+                    continue;
+                }
                 if (local >= 0 && local < clip.duration && clip.thumbs && clip.type !== 'audio') {
                     const aspect = clip.aspect || (16 / 9);
                     const frameW = clip.thumbs.height * aspect;
@@ -3582,6 +3970,10 @@ function createFragmentClip(parent, video) {
         start: 0,
         chroma: parent.chroma,
         chromaManual: parent.chromaManual,
+        image: parent.image,                       // Imágenes: la misma imagen
+        txt: parent.txt ? { ...parent.txt } : undefined,   // Textos: mismo contenido y formato
+        filterType: parent.filterType,
+        intensity: parent.intensity,
         tf: parent.tf ? { ...parent.tf } : null,   // Las dos mitades de un corte conservan la posición / tamaño
         muted: parent.muted,
         volume: parent.volume ?? 1,   // Las dos mitades de un corte conservan el volumen
@@ -3596,6 +3988,7 @@ function createFragmentClip(parent, video) {
 }
 
 function discardFragment(clip) {
+    if (!clip.video) return;   // Imágenes y textos no tienen <video>
     clip.video.removeAttribute('src');
     clip.video.load();
 }
@@ -3635,8 +4028,9 @@ async function applyTrim(t0, t1, rows) {
         for (const { plan } of plans) {
             for (const p of plan) {
                 if (p.kind !== 'split') continue;
-                const video = await openClipVideo(p.clip.url, p.clip.type === 'audio');
-                if (!video) throw new Error('No se pudo abrir el video para el recorte');
+                const hasMedia = p.clip.type !== 'image' && p.clip.type !== 'text';   // Imágenes y textos no tienen <video>
+                const video = hasMedia ? await openClipVideo(p.clip.url, p.clip.type === 'audio') : null;
+                if (hasMedia && !video) throw new Error('No se pudo abrir el video para el recorte');
                 p.newClip = createFragmentClip(p.clip, video);
                 created.push(p.newClip);
             }
@@ -3657,6 +4051,7 @@ async function applyTrim(t0, t1, rows) {
                 for (const { clip, part, isNew } of finals) {
                     const local = at - part.start;
                     const v = clip.video;
+                    if (!v) continue;   // Imágenes y textos no hay que preparar
                     if (local >= 0 && local < part.duration) {
                         jobs.push(prepareVideoAt(v, part.srcStart + local));
                     } else if (isNew) {
@@ -3674,7 +4069,7 @@ async function applyTrim(t0, t1, rows) {
         for (const { row, plan } of plans) {
             for (const p of plan) {
                 if (p.kind === 'remove') {
-                    p.clip.video.pause();
+                    if (p.clip.video) p.clip.video.pause();
                     p.clip.el.remove(); // El clip sigue guardado: Ctrl+Z lo recupera
                     continue;
                 }
