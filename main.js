@@ -3380,7 +3380,7 @@ exportBtn.addEventListener('click', async () => {
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
     const format = pickRecorderFormat();
-    const baseName = (project.name || 'video_editado').replace(/[\\/:*?"<>|]+/g, '_');
+    const baseName = (project.name || 'video_editado').trim().replace(/[\s]+/g, '_').replace(/[\\/:*?"<>|]+/g, '_');
     const fileName = `${baseName}.${format.ext}`;
 
     // 2. Elegir nombre y ubicación (si el navegador lo soporta)
