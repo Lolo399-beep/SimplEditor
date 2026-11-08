@@ -1279,3 +1279,115 @@ body.trim-mode .ruler {
 .filter-intensity-input:focus {
     border-bottom-color: #38b6ff;
 }
+
+
+/* --- Textos --- */
+.clip.text-clip {
+    background-color: #4a4a4a;
+    border-color: #ffd24d;
+    overflow: visible;           /* Deja ver la manilla para alargar / acortar el texto */
+}
+.clip.text-clip .clip-badge { color: #ffd24d; }
+
+/* Cartel para editar el texto (se abre con doble clic en el texto o clic derecho > Editar texto...) */
+.text-popup {
+    position: fixed;
+    z-index: 1002;
+    width: 310px;
+    background-color: #000000;
+    border: 1px solid #ffffff;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.9);
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    color: #ffffff;
+}
+
+.text-popup-title {
+    font-size: 0.85rem;
+    color: #cccccc;
+}
+
+.text-popup textarea {
+    width: 100%;
+    min-height: 64px;
+    max-height: 200px;
+    resize: vertical;
+    background-color: #000000;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    outline: none;
+}
+
+.text-popup textarea:focus {
+    border-color: #38b6ff;
+}
+
+.text-popup-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.text-popup-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.text-popup input[type="color"] {
+    width: 34px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid #ffffff;
+    background: transparent;
+    cursor: pointer;
+}
+
+.text-popup input[type="color"]:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.text-size-input {
+    width: 60px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #ffffff;
+    color: #ffffff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9rem;
+    text-align: right;
+    outline: none;
+}
+
+.text-size-input:focus {
+    border-bottom-color: #38b6ff;
+}
+
+.text-toggle {
+    width: 30px;
+    height: 28px;
+    background-color: transparent;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    cursor: pointer;
+    font-size: 0.95rem;
+}
+
+.text-toggle:hover {
+    background-color: #333333;
+}
+
+.text-toggle.active {
+    background-color: #ffffff;
+    color: #000000;
+}
