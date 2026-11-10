@@ -1391,3 +1391,24 @@ body.trim-mode .ruler {
     background-color: #ffffff;
     color: #000000;
 }
+
+
+/* Panel de ajustes avanzados de imagen */
+.filter-popup { max-height: min(82vh, 760px); overflow-y: auto; width: 330px; padding: 14px; }
+.filter-section-title { color: #f3f3f3; font-size: 13px; font-weight: 700; margin: 2px 0 9px; }
+.filter-intensity-wrapper { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.filter-intensity-wrapper label { color: #cfcfcf; font-size: 12px; }
+.adjustment-divider { height: 1px; background: #454545; margin: 14px 0; }
+.adjustment-panel { display: flex; flex-direction: column; gap: 13px; }
+.adjustment-group { display: flex; flex-direction: column; gap: 8px; }
+.adjustment-heading { color: #9edcff; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.adjustment-row { display: grid; grid-template-columns: 104px minmax(70px, 1fr) 42px; align-items: center; gap: 8px; color: #eee; font-size: 12px; }
+.adjustment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adjustment-slider { width: 100%; min-width: 0; accent-color: #38b6ff; cursor: pointer; }
+.adjustment-value { color: #fff; text-align: right; font: 11px ui-monospace, monospace; }
+.hsl-colors { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+.hsl-color-option { display: flex; align-items: center; gap: 5px; color: #ddd; font-size: 11px; cursor: pointer; }
+.hsl-color-option input { accent-color: #38b6ff; }
+.adjustment-help { color: #999; font-size: 10px; line-height: 1.4; }
+.filter-popup::-webkit-scrollbar { width: 7px; }
+.filter-popup::-webkit-scrollbar-thumb { background: #555; border-radius: 8px; }
