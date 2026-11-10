@@ -142,7 +142,8 @@ function serializeRows() {
                 type: el._clip.type || 'video',
                 chroma: el._clip.chroma || 'none',
                 filterType: el._clip.filterType || 'none',     // << NUEVO
-                intensity: el._clip.intensity ?? 100,           // << NUEVO
+                intensity: el._clip.intensity ?? 100,           // Intensidad del filtro preestablecido
+                adjustments: getClipAdjustments(el._clip),
                 color: el._clip.color,
                 srcStart: el._clip.srcStart || 0,
                 duration: el._clip.duration,
@@ -361,6 +362,7 @@ function buildRows(rowsData, project) {
             if (c.chroma != null) clip.chroma = c.chroma;
             if (c.filterType != null) clip.filterType = c.filterType;
             if (c.intensity != null) clip.intensity = c.intensity;
+            clip.adjustments = { ...ADJUSTMENT_DEFAULTS, ...(c.adjustments || {}), hslColors: [...((c.adjustments && c.adjustments.hslColors) || [])] };
             if (c.color != null) clip.color = c.color;
             if (c.srcStart != null) clip.srcStart = c.srcStart;
             if (c.duration != null) clip.duration = c.duration;
@@ -1175,6 +1177,7 @@ const volumePopup = document.createElement('div');
 const filterPopup = document.createElement('div');
 filterPopup.className = 'filter-popup hidden';
 filterPopup.innerHTML = `
+    <div class="filter-section-title">Filtros preestablecidos</div>
     <select class="filter-select" id="filterTypeSelect">
         <option value="none">Sin filtro</option>
         <option value="letterbox">Barras negras</option>
@@ -1188,25 +1191,87 @@ filterPopup.innerHTML = `
         <option value="glitch">Glitch</option>
     </select>
     <div class="filter-intensity-wrapper">
+        <label for="filterIntensityInput">Intensidad del filtro</label>
         <input type="text" id="filterIntensityInput" class="filter-intensity-input" maxlength="4" value="100%">
     </div>
+    <div class="adjustment-divider"></div>
+    <div class="filter-section-title">Ajustes de imagen</div>
+    <div id="adjustmentPanel" class="adjustment-panel"></div>
 `;
 document.body.appendChild(filterPopup);
 
 const filterTypeSelect = document.getElementById('filterTypeSelect');
 const filterIntensityInput = document.getElementById('filterIntensityInput');
+const adjustmentPanel = document.getElementById('adjustmentPanel');
+
+const ADJUSTMENT_DEFAULTS = Object.freeze({
+    exposure: 0, brightness: 0, contrast: 0, highlights: 0, shadows: 0,
+    saturation: 0, vibrance: 0, temperature: 0, tint: 0, sharpness: 0,
+    blur: 0, vignette: 0, grain: 0, hslColors: []
+});
+const ADJUSTMENT_GROUPS = [
+    { title: 'Luz', items: [['exposure','Exposición'],['brightness','Brillo'],['contrast','Contraste'],['highlights','Highlights'],['shadows','Sombras']] },
+    { title: 'Color', items: [['saturation','Saturación'],['vibrance','Vibrance'],['temperature','Temperatura'],['tint','Tint']] },
+    { title: 'Detalle y efectos', items: [['sharpness','Sharpness'],['blur','Desenfoque'],['vignette','Viñeta'],['grain','Grain']] },
+    { title: 'HSL · Ajuste selectivo', items: [['hslHue','Tono HSL'],['hslSaturation','Saturación HSL'],['hslLightness','Luminosidad HSL']] }
+];
+const HSL_COLOR_OPTIONS = [
+    ['red','Rojo'],['orange','Naranja'],['yellow','Amarillo'],['green','Verde'],
+    ['cyan','Cian'],['blue','Azul'],['purple','Violeta'],['magenta','Magenta']
+];
+function getClipAdjustments(clip) {
+    const a = clip && clip.adjustments ? clip.adjustments : {};
+    return { ...ADJUSTMENT_DEFAULTS, ...a, hslColors: Array.isArray(a.hslColors) ? [...a.hslColors] : [] };
+}
+function buildAdjustmentPanel() {
+    adjustmentPanel.innerHTML = ADJUSTMENT_GROUPS.map(group => `
+        <section class="adjustment-group">
+            <div class="adjustment-heading">${group.title}</div>
+            ${group.items.map(([key,label]) => `
+                <label class="adjustment-row" for="adj-${key}">
+                    <span class="adjustment-name">${label}</span>
+                    <input id="adj-${key}" class="adjustment-slider" data-adjustment="${key}" type="range" min="${['sharpness','blur','vignette','grain'].includes(key)?0:-100}" max="100" step="1" value="0">
+                    <output class="adjustment-value" data-value-for="${key}">0%</output>
+                </label>`).join('')}
+        </section>`).join('') + `
+        <section class="adjustment-group hsl-group">
+            <div class="adjustment-heading">HSL · Seleccionar colores</div>
+            <div class="hsl-colors">${HSL_COLOR_OPTIONS.map(([key,label]) => `
+                <label class="hsl-color-option"><input type="checkbox" data-hsl-color="${key}"><span>${label}</span></label>`).join('')}
+            </div>
+            <p class="adjustment-help">La selección activa el ajuste selectivo de esos tonos.</p>
+        </section>`;
+}
+buildAdjustmentPanel();
 
 let filterTargetClip = null;
 let filterBeforeType = 'none';
 let filterBeforeIntensity = 100;
+let filterBeforeAdjustments = '';
+
+function syncAdjustmentControls(clip) {
+    const a = getClipAdjustments(clip);
+    adjustmentPanel.querySelectorAll('[data-adjustment]').forEach(input => {
+        const key = input.dataset.adjustment;
+        input.value = a[key] ?? 0;
+        const output = adjustmentPanel.querySelector(`[data-value-for="${key}"]`);
+        if (output) output.value = `${a[key] ?? 0}%`;
+    });
+    adjustmentPanel.querySelectorAll('[data-hsl-color]').forEach(input => {
+        input.checked = a.hslColors.includes(input.dataset.hslColor);
+    });
+}
 
 function openFilterPopup(clip, anchorEl) {
     if (clip.locked) return;
     filterTargetClip = clip;
     filterBeforeType = clip.filterType || 'none';
     filterBeforeIntensity = clip.intensity ?? 100;
+    clip.adjustments = getClipAdjustments(clip);
+    filterBeforeAdjustments = JSON.stringify(clip.adjustments);
 
     filterTypeSelect.value = filterBeforeType;
+    syncAdjustmentControls(clip);
     filterIntensityInput.value = `${filterBeforeIntensity}%`;
 
     const r = anchorEl.getBoundingClientRect();
@@ -1222,8 +1287,9 @@ function closeFilterPopup() {
     if (filterPopup.classList.contains('hidden')) return;
     filterPopup.classList.add('hidden');
     if (filterTargetClip) {
-        if ((filterTargetClip.filterType || 'none') !== filterBeforeType || 
-            (filterTargetClip.intensity ?? 100) !== filterBeforeIntensity) {
+        if ((filterTargetClip.filterType || 'none') !== filterBeforeType ||
+            (filterTargetClip.intensity ?? 100) !== filterBeforeIntensity ||
+            JSON.stringify(getClipAdjustments(filterTargetClip)) !== filterBeforeAdjustments) {
             commit();
         }
     }
@@ -1263,9 +1329,28 @@ filterIntensityInput.addEventListener('blur', () => {
 
 filterIntensityInput.addEventListener('keydown', (e) => {
     e.stopPropagation();
-    if (e.key === 'Enter') {
-        filterIntensityInput.blur();
-    }
+    if (e.key === 'Enter') filterIntensityInput.blur();
+});
+adjustmentPanel.addEventListener('input', (e) => {
+    const input = e.target.closest('[data-adjustment]');
+    if (!input || !filterTargetClip) return;
+    const key = input.dataset.adjustment;
+    const value = Number(input.value);
+    filterTargetClip.adjustments = getClipAdjustments(filterTargetClip);
+    filterTargetClip.adjustments[key] = value;
+    const output = adjustmentPanel.querySelector(`[data-value-for="${key}"]`);
+    if (output) output.value = `${value}%`;
+    requestRender();
+});
+adjustmentPanel.addEventListener('change', (e) => {
+    const input = e.target.closest('[data-hsl-color]');
+    if (!input || !filterTargetClip) return;
+    filterTargetClip.adjustments = getClipAdjustments(filterTargetClip);
+    const colors = new Set(filterTargetClip.adjustments.hslColors);
+    if (input.checked) colors.add(input.dataset.hslColor);
+    else colors.delete(input.dataset.hslColor);
+    filterTargetClip.adjustments.hslColors = [...colors];
+    requestRender();
 });
 volumePopup.className = 'volume-popup';
 volumePopup.innerHTML = `
@@ -2545,33 +2630,47 @@ function hasTransform(t) {
 //   tf.x / tf.y  = desplazamiento del centro (fracción del ancho / alto del lienzo)
 //   tf.sx / tf.sy = escala horizontal / vertical (1 = tamaño original)
 //   tf.r         = rotación en grados
+let filterLayerCanvas = document.createElement('canvas');
+let filterLayerCtx = filterLayerCanvas.getContext('2d', { willReadFrequently: true });
+
 function drawClipLayer(ctx, clip, source, fit, canvasW, canvasH) {
+    if (!fit || !source) return;
     const { x, y, w, h } = fit;
-    const t = clip.tf;
+    const t = clip.tf || { x: 0, y: 0, r: 0, sx: 1, sy: 1 };
     const moved = hasTransform(t);
     const keyed = clip.chroma !== 'none';
 
+    if (filterLayerCanvas.width !== canvasW || filterLayerCanvas.height !== canvasH) {
+        filterLayerCanvas.width = canvasW;
+        filterLayerCanvas.height = canvasH;
+        filterLayerCtx = filterLayerCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    filterLayerCtx.clearRect(0, 0, canvasW, canvasH);
+
+    let layerSource = source;
     if (keyed) {
         sctx.clearRect(0, 0, canvasW, canvasH);
         sctx.drawImage(source, x, y, w, h);
         applyChromaKey(sctx, x, y, w, h, clip.chroma);
+        layerSource = scratch;
     }
 
     if (!moved) {
-        if (keyed) ctx.drawImage(scratch, 0, 0);
-        else ctx.drawImage(source, x, y, w, h);
+        if (keyed) filterLayerCtx.drawImage(layerSource, 0, 0, canvasW, canvasH);
+        else filterLayerCtx.drawImage(layerSource, x, y, w, h);
     } else {
-        ctx.save();
-        ctx.translate(x + w / 2 + t.x * canvasW, y + h / 2 + t.y * canvasH);
-        ctx.rotate(t.r * Math.PI / 180);
-        ctx.scale(t.sx, t.sy);
-        if (keyed) ctx.drawImage(scratch, x, y, w, h, -w / 2, -h / 2, w, h);
-        else ctx.drawImage(source, -w / 2, -h / 2, w, h);
-        ctx.restore();
+        filterLayerCtx.save();
+        filterLayerCtx.translate(x + w / 2 + (t.x || 0) * canvasW, y + h / 2 + (t.y || 0) * canvasH);
+        filterLayerCtx.rotate((t.r || 0) * Math.PI / 180);
+        filterLayerCtx.scale(t.sx ?? 1, t.sy ?? 1);
+        if (keyed) filterLayerCtx.drawImage(layerSource, x, y, w, h, -w / 2, -h / 2, w, h);
+        else filterLayerCtx.drawImage(layerSource, -w / 2, -h / 2, w, h);
+        filterLayerCtx.restore();
     }
 
-    // << APLICA LOS FILTROS Y TONALIDADES >>
-    applyVideoFilters(ctx, clip, fit, canvasW, canvasH);
+    applyVideoFilters(filterLayerCtx, clip, fit, canvasW, canvasH);
+    applyClipAdjustments(filterLayerCtx, clip, fit, canvasW, canvasH);
+    ctx.drawImage(filterLayerCanvas, 0, 0);
 }
 
 function requestRender() {
@@ -4601,6 +4700,119 @@ function applyVideoFilters(ctx, clip, fit, canvasW, canvasH) {
             ctx.drawImage(ctx.canvas, x - shift, y, w, h, x, y, w, h);
             ctx.restore();
         }
+    }
+}
+
+
+// Ajustes de imagen por clip. Se ejecutan en el mismo compositor usado por preview y exportación.
+const HSL_RANGES = {
+    red: [[345, 360], [0, 15]], orange: [[15, 45]], yellow: [[45, 70]],
+    green: [[70, 165]], cyan: [[165, 200]], blue: [[200, 255]],
+    purple: [[255, 290]], magenta: [[290, 345]]
+};
+function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    let h = 0, s = 0, l = (max + min) / 2;
+    if (d) {
+        s = d / (1 - Math.abs(2 * l - 1));
+        switch (max) {
+            case r: h = 60 * (((g - b) / d) % 6); break;
+            case g: h = 60 * ((b - r) / d + 2); break;
+            default: h = 60 * ((r - g) / d + 4); break;
+        }
+    }
+    return [(h + 360) % 360, s, l];
+}
+function hslToRgb(h, s, l) {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    const m = l - c / 2;
+    let rgb = [0, 0, 0];
+    if (h < 60) rgb = [c, x, 0]; else if (h < 120) rgb = [x, c, 0];
+    else if (h < 180) rgb = [0, c, x]; else if (h < 240) rgb = [0, x, c];
+    else if (h < 300) rgb = [x, 0, c]; else rgb = [c, 0, x];
+    return rgb.map(v => Math.round((v + m) * 255));
+}
+function selectedHslColor(h, selected) {
+    return selected.some(name => HSL_RANGES[name]?.some(([a, b]) => h >= a && h <= b));
+}
+function applyClipAdjustments(ctx, clip, fit, canvasW, canvasH) {
+    const a = getClipAdjustments(clip);
+    if (!Object.keys(ADJUSTMENT_DEFAULTS).some(k => k !== 'hslColors' && Number(a[k] || 0) !== 0) && !a.hslColors.length) return;
+    const x = Math.max(0, Math.floor(fit.x)), y = Math.max(0, Math.floor(fit.y));
+    const w = Math.max(1, Math.min(canvasW - x, Math.ceil(fit.w)));
+    const h = Math.max(1, Math.min(canvasH - y, Math.ceil(fit.h)));
+    if (!w || !h) return;
+    let image;
+    try { image = ctx.getImageData(x, y, w, h); } catch (err) { console.warn('No se pudieron aplicar los ajustes:', err); return; }
+    const d = image.data;
+    const original = new Uint8ClampedArray(d);
+    const exposure = Math.pow(2, (a.exposure || 0) / 100 * 2);
+    const brightness = 1 + (a.brightness || 0) / 100;
+    const contrast = 1 + (a.contrast || 0) / 100;
+    const saturation = 1 + (a.saturation || 0) / 100;
+    const vibrance = (a.vibrance || 0) / 100;
+    const temp = (a.temperature || 0) * 0.55;
+    const tint = (a.tint || 0) * 0.45;
+    const highlight = (a.highlights || 0) / 100;
+    const shadow = (a.shadows || 0) / 100;
+    const selective = a.hslColors || [];
+
+    for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] === 0) continue;
+        let r = d[i], g = d[i + 1], b = d[i + 2];
+        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const shadowMask = 1 - Math.min(1, lum / 180);
+        const highlightMask = Math.max(0, (lum - 75) / 180);
+        r = (r * exposure + highlight * 85 * highlightMask + shadow * 85 * shadowMask + temp) * brightness;
+        g = (g * exposure + highlight * 85 * highlightMask + shadow * 85 * shadowMask - tint * 0.15) * brightness;
+        b = (b * exposure + highlight * 85 * highlightMask + shadow * 85 * shadowMask - temp + tint) * brightness;
+        r = (r - 128) * contrast + 128; g = (g - 128) * contrast + 128; b = (b - 128) * contrast + 128;
+        const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const satBoost = saturation + vibrance * (1 - Math.min(1, Math.abs(gray - (r + g + b) / 3) / 100));
+        r = gray + (r - gray) * satBoost; g = gray + (g - gray) * satBoost; b = gray + (b - gray) * satBoost;
+        if (selective.length) {
+            const [hue, sat, light] = rgbToHsl(r, g, b);
+            if (selectedHslColor(hue, selective)) {
+                const newHue = (hue + (a.hslHue || 0) * 1.8 + 360) % 360;
+                const newSat = Math.min(1, Math.max(0, sat * (1 + (a.hslSaturation || 0) / 100)));
+                const newLight = Math.min(1, Math.max(0, light + (a.hslLightness || 0) / 200));
+                const [nr, ng, nb] = hslToRgb(newHue, newSat, newLight);
+                r = nr; g = ng; b = nb;
+            }
+        }
+        const px = (i / 4) % w, py = Math.floor((i / 4) / w);
+        const nx = (px - w / 2) / Math.max(1, w / 2), ny = (py - h / 2) / Math.max(1, h / 2);
+        const vignette = Math.max(0, Math.min(1, (nx * nx + ny * ny - 0.18) / 1.15)) * (a.vignette || 0) / 100;
+        const grain = (a.grain || 0) ? ((((px * 374761393 + py * 668265263) ^ ((px + py) * 2246822519)) >>> 0) / 4294967295 - 0.5) * (a.grain || 0) * 0.8 : 0;
+        const factor = 1 - vignette * 0.85;
+        d[i] = r * factor + grain; d[i + 1] = g * factor + grain; d[i + 2] = b * factor + grain;
+    }
+    ctx.putImageData(image, x, y);
+
+    // Desenfoque gaussiano aproximado mediante una capa temporal para evitar auto-dibujado del canvas.
+    if (a.blur > 0) {
+        const amount = (a.blur / 100) * 8;
+        const tempCanvas = document.createElement('canvas'); tempCanvas.width = w; tempCanvas.height = h;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.filter = `blur(${amount}px)`;
+        tempCtx.drawImage(ctx.canvas, x, y, w, h, 0, 0, w, h);
+        tempCtx.filter = 'none';
+        ctx.save(); ctx.clearRect(x, y, w, h); ctx.drawImage(tempCanvas, x, y); ctx.restore();
+    }
+    // Enfoque (unsharp mask) a partir de los píxeles originales.
+    if (a.sharpness > 0) {
+        const current = ctx.getImageData(x, y, w, h), out = current.data;
+        const amount = (a.sharpness / 100) * 1.8;
+        for (let py = 1; py < h - 1; py++) for (let px = 1; px < w - 1; px++) {
+            const i = (py * w + px) * 4;
+            for (let c = 0; c < 3; c++) {
+                const avg = (out[i - 4 + c] + out[i + 4 + c] + out[i - w * 4 + c] + out[i + w * 4 + c]) / 4;
+                out[i + c] = Math.max(0, Math.min(255, out[i + c] + (out[i + c] - avg) * amount));
+            }
+        }
+        ctx.putImageData(current, x, y);
     }
 }
 
