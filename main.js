@@ -372,6 +372,7 @@ function buildRows(rowsData, project) {
             clip.tf = c.tf ? { ...c.tf } : null;
             if (c.txt) clip.txt = { ...c.txt };
             placeClip(row, clip);
+            drawClipFilmstrip(clip, true);
         });
     });
 }
@@ -1309,6 +1310,7 @@ filterTypeSelect.addEventListener('change', () => {
     if (!filterTargetClip) return;
     filterTargetClip.filterType = filterTypeSelect.value;
     updateClipBadge(filterTargetClip);
+    drawClipFilmstrip(filterTargetClip, true);
     requestRender();
 });
 
@@ -1319,6 +1321,8 @@ filterIntensityInput.addEventListener('input', () => {
     val = Math.min(100, Math.max(0, val));
     
     filterTargetClip.intensity = val;
+    updateClipBadge(filterTargetClip);
+    drawClipFilmstrip(filterTargetClip, true);
     requestRender();
 });
 
@@ -1340,6 +1344,7 @@ adjustmentPanel.addEventListener('input', (e) => {
     filterTargetClip.adjustments[key] = value;
     const output = adjustmentPanel.querySelector(`[data-value-for="${key}"]`);
     if (output) output.value = `${value}%`;
+    drawClipFilmstrip(filterTargetClip, true);
     requestRender();
 });
 adjustmentPanel.addEventListener('change', (e) => {
@@ -1350,6 +1355,7 @@ adjustmentPanel.addEventListener('change', (e) => {
     if (input.checked) colors.add(input.dataset.hslColor);
     else colors.delete(input.dataset.hslColor);
     filterTargetClip.adjustments.hslColors = [...colors];
+    drawClipFilmstrip(filterTargetClip, true);
     requestRender();
 });
 volumePopup.className = 'volume-popup';
@@ -1995,27 +2001,54 @@ function layoutClip(clip) {
 }
 
 // Dibuja en la tira del fragmento el tramo [srcStart, srcStart + duration] de la tira completa de la fuente
+
+// Aplica los filtros preestablecidos y ajustes de imagen al canvas de miniaturas de la fila
+function applyEffectsToFilmstrip(clip, ctx, w, h) {
+    const hasFilter = clip.filterType && clip.filterType !== 'none' && (clip.intensity ?? 100) > 0;
+    const adj = getClipAdjustments(clip);
+    const hasAdj = Object.keys(ADJUSTMENT_DEFAULTS).some(k => k !== 'hslColors' && Number(adj[k] || 0) !== 0) || adj.hslColors.length > 0;
+    if (!hasFilter && !hasAdj) return;
+
+    const fit = { x: 0, y: 0, w, h };
+    if (hasFilter) applyVideoFilters(ctx, clip, fit, w, h);
+    if (hasAdj) applyClipAdjustments(ctx, clip, fit, w, h);
+}
+
 function drawClipFilmstrip(clip, force = false) {
     const cv = clip.thumbs;
     const ctx = clip.thumbCtx;
     if (!cv || !ctx) return;
     if (clip.type === 'audio') { drawAudioWaveform(clip, force); return; }
-    if (clip.type === 'text') { drawTextStrip(clip, force); return; }
+    if (clip.type === 'text') {
+        const fxKey = `${clip.filterType || 'none'}|${clip.intensity ?? 100}|${JSON.stringify(getClipAdjustments(clip))}`;
+        drawTextStrip(clip, force || clip._lastTextFx !== fxKey);
+        clip._lastTextFx = fxKey;
+        applyEffectsToFilmstrip(clip, ctx, cv.width, cv.height);
+        return;
+    }
+
+    const fxKey = `${clip.filterType || 'none'}|${clip.intensity ?? 100}|${JSON.stringify(getClipAdjustments(clip))}`;
+
     if (clip.type === 'image') {
         const w = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(clip.duration * PX_PER_SEC)));
+        const key = `img|${w}|${fxKey}`;
+        if (!force && clip.thumbKey === key) return;
+        clip.thumbKey = key;
+
         if (cv.width !== w) cv.width = w;
         if (cv.height !== THUMB_H) cv.height = THUMB_H;
         ctx.fillStyle = '#202020'; ctx.fillRect(0, 0, cv.width, cv.height);
         if (clip.image && clip.image.complete) {
             const tileW = Math.max(1, Math.round(THUMB_H * clip.aspect));
             for (let x = 0; x < cv.width; x += tileW) ctx.drawImage(clip.image, x, 0, Math.min(tileW, cv.width - x), THUMB_H);
+            applyEffectsToFilmstrip(clip, ctx, cv.width, cv.height);
         }
         return;
     }
     const strip = clip.source && clip.source.thumbs;
     if (!strip) return;
 
-    const key = `${clip.srcStart.toFixed(3)}|${clip.duration.toFixed(3)}`;
+    const key = `${clip.srcStart.toFixed(3)}|${clip.duration.toFixed(3)}|${fxKey}`;
     if (!force && clip.thumbKey === key) return;
     clip.thumbKey = key;
 
@@ -2027,7 +2060,10 @@ function drawClipFilmstrip(clip, force = false) {
     const k = strip.width / clip.source.duration;   // px de la tira por segundo de video
     const sx = Math.max(0, clip.srcStart * k);
     const sw = Math.min(strip.width - sx, clip.duration * k);
-    if (sw > 0) ctx.drawImage(strip, sx, 0, sw, strip.height, 0, 0, cv.width, cv.height);
+    if (sw > 0) {
+        ctx.drawImage(strip, sx, 0, sw, strip.height, 0, 0, cv.width, cv.height);
+        applyEffectsToFilmstrip(clip, ctx, cv.width, cv.height);
+    }
 }
 
 // Cuando la fuente tiene fotogramas nuevos, vuelve a dibujar todos sus fragmentos
@@ -4143,6 +4179,7 @@ function createFragmentClip(parent, video) {
         txt: parent.txt ? { ...parent.txt } : undefined,   // Textos: mismo contenido y formato
         filterType: parent.filterType,
         intensity: parent.intensity,
+        adjustments: getClipAdjustments(parent),
         tf: parent.tf ? { ...parent.tf } : null,   // Las dos mitades de un corte conservan la posición / tamaño
         muted: parent.muted,
         volume: parent.volume ?? 1,   // Las dos mitades de un corte conservan el volumen
