@@ -3031,6 +3031,48 @@ updateViewWidth();
 const exportBtn = document.getElementById('exportBtn');
 const exportModal = document.getElementById('exportModal');
 const exportProgress = document.getElementById('exportProgress');
+const exportQualityModal = document.getElementById('exportQualityModal');
+const cancelQualityBtn = document.getElementById('cancelQualityBtn');
+
+// Muestra el selector de calidad (144p..1080p) y devuelve { height, bitrate } o null si cancela
+function askExportQuality() {
+    return new Promise((resolve) => {
+        exportQualityModal.classList.remove('hidden');
+
+        const cleanupModal = () => {
+            exportQualityModal.classList.add('hidden');
+            exportQualityModal.removeEventListener('click', onSelect);
+            cancelQualityBtn.removeEventListener('click', onCancel);
+            document.removeEventListener('keydown', onKey);
+        };
+
+        const onSelect = (e) => {
+            const btn = e.target.closest('.quality-option-btn');
+            if (!btn) return;
+            cleanupModal();
+            resolve({
+                height: parseInt(btn.dataset.height, 10),
+                bitrate: parseInt(btn.dataset.bitrate, 10)
+            });
+        };
+
+        const onCancel = () => {
+            cleanupModal();
+            resolve(null);
+        };
+
+        const onKey = (e) => {
+            if (e.key === 'Escape') {
+                e.stopPropagation();
+                onCancel();
+            }
+        };
+
+        exportQualityModal.addEventListener('click', onSelect);
+        cancelQualityBtn.addEventListener('click', onCancel);
+        document.addEventListener('keydown', onKey);
+    });
+}
 
 // --- Audio -----------------------------------------------------------
 // Cada <video> pasa por un nodo de ganancia y de ahí a los parlantes.
@@ -3471,16 +3513,29 @@ exportBtn.addEventListener('click', async () => {
     }
 
     exitTrimMode();
-
     closeTextPopup();
 
-    // 1. El audio se prepara DENTRO del clic (gesto del usuario); si no, el navegador lo deja en silencio
+    // 0. Pedir la calidad de imagen antes de exportar (144p, 240p, 480p, 720p, 1080p)
+    const quality = await askExportQuality();
+    if (!quality) return; // El usuario canceló
+
+    // Guardar resolución actual de vista previa (360p) para restaurarla al terminar
+    const prevW = previewCanvas.width;
+    const prevH = previewCanvas.height;
+
+    // Calcular dimensiones de exportación respetando la relación de aspecto actual (16:9, 9:16, 1:1, etc.)
+    // Se asegura número par en ancho y alto para evitar errores en codificadores H.264/VP9
+    const exportH = quality.height;
+    let exportW = Math.round(exportH * (currentAspectW / currentAspectH));
+    if (exportW % 2 !== 0) exportW++;
+
+    // 1. El audio se prepara DENTRO del clic / flujo de exportación; si no, el navegador lo deja en silencio
     ensureAudioGraph();
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
     const format = pickRecorderFormat();
     const baseName = (project.name || 'video_editado').trim().replace(/[\s]+/g, '_').replace(/[\\/:*?"<>|]+/g, '_');
-    const fileName = `${baseName}.${format.ext}`;
+    const fileName = `${baseName}_${exportH}p.${format.ext}`;
 
     // 2. Elegir nombre y ubicación (si el navegador lo soporta)
     let fileHandle = null;
@@ -3501,8 +3556,15 @@ exportBtn.addEventListener('click', async () => {
     // 3. Mostrar el progreso y bloquear la edición mientras se graba
     exporting = true;
     exportProgress.style.whiteSpace = 'pre-line';
-    exportProgress.textContent = 'Preparando...';
+    exportProgress.textContent = `Preparando exportación en ${exportH}p (${exportW}x${exportH})...`;
     exportModal.classList.remove('hidden');
+
+    // Escalar los lienzos de renderizado a la resolución elegida
+    previewCanvas.width = exportW;
+    previewCanvas.height = exportH;
+    scratch.width = exportW;
+    scratch.height = exportH;
+    clearFrameDelay();
 
     let stream = null;
     let recordDest = null;
@@ -3517,7 +3579,7 @@ exportBtn.addEventListener('click', async () => {
         const t = Math.min(clock.t, exportEnd);
         const pct = Math.min(100, Math.round((t / exportEnd) * 100));
         exportProgress.textContent =
-            `${formatTime(t)} / ${formatTime(exportEnd)}  (${pct}%)\nMantén esta ventana visible hasta que termine.`;
+            `Exportando en ${exportH}p · ${formatTime(t)} / ${formatTime(exportEnd)}  (${pct}%)\nMantén esta ventana visible hasta que termine.`;
     };
 
     // Ventana oculta / minimizada: se pausa TODO junto (grabación, audio, reloj y videos)
@@ -3554,6 +3616,14 @@ exportBtn.addEventListener('click', async () => {
             });
         }
         if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+
+        // Restaurar la resolución de vista previa para mantener fluidez al editar
+        previewCanvas.width = prevW;
+        previewCanvas.height = prevH;
+        scratch.width = prevW;
+        scratch.height = prevH;
+        clearFrameDelay();
+
         exporting = false;
         clock.playing = false;
         cancelAnimationFrame(clock.raf);
@@ -3579,7 +3649,7 @@ exportBtn.addEventListener('click', async () => {
         }
         stream = new MediaStream(tracks);
 
-        const recorderOptions = { videoBitsPerSecond: 8000000, audioBitsPerSecond: 192000 };
+        const recorderOptions = { videoBitsPerSecond: quality.bitrate, audioBitsPerSecond: 192000 };
         if (format.mime) recorderOptions.mimeType = format.mime;
 
         recorder = new MediaRecorder(stream, recorderOptions);
@@ -3678,7 +3748,7 @@ exportBtn.addEventListener('click', async () => {
 
         await saveBlob(finalBlob, fileHandle, fileName);
         console.log(
-            `[Exportar] proyecto: ${exportEnd.toFixed(2)} s a ${formatSpeed(exportSpeed)} (esperado ${(exportEnd / exportSpeed).toFixed(2)} s) · grabado: ${(loopMs / 1000).toFixed(2)} s · ` +
+            `[Exportar] ${exportW}x${exportH} (${exportH}p) · proyecto: ${exportEnd.toFixed(2)} s a ${formatSpeed(exportSpeed)} (esperado ${(exportEnd / exportSpeed).toFixed(2)} s) · grabado: ${(loopMs / 1000).toFixed(2)} s · ` +
             `${(finalBlob.size / 1048576).toFixed(1)} MB · ${recorder.mimeType || format.type}` +
             (finalBlob !== blob ? ' · duración corregida' : '')
         );
@@ -3690,7 +3760,7 @@ exportBtn.addEventListener('click', async () => {
         cleanup();
     }
 
-    if (ok) alert(`¡Video exportado con éxito!\nDuración: ${formatTime(exportEnd / exportSpeed)} (${formatSpeed(exportSpeed)})`);
+    if (ok) alert(`¡Video exportado con éxito en ${exportH}p!\nDuración: ${formatTime(exportEnd / exportSpeed)} (${formatSpeed(exportSpeed)})`);
 });
 // --- Control del Menú de Relación de Aspecto ---
 const aspectMenuBtn = document.getElementById('aspectMenuBtn');
