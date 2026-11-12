@@ -115,6 +115,22 @@
         </div>
     </div>
 
+        <!-- Modal de selección de calidad antes de exportar -->
+    <div id="exportQualityModal" class="quality-modal hidden">
+        <div class="quality-modal-box">
+            <h3>Calidad de exportación</h3>
+            <p class="quality-modal-sub">Elige la resolución vertical del video</p>
+            <div class="quality-options">
+                <button type="button" class="quality-option-btn" data-height="144" data-bitrate="500000">144p</button>
+                <button type="button" class="quality-option-btn" data-height="240" data-bitrate="1000000">240p</button>
+                <button type="button" class="quality-option-btn" data-height="480" data-bitrate="2500000">480p</button>
+                <button type="button" class="quality-option-btn" data-height="720" data-bitrate="6000000">720p</button>
+                <button type="button" class="quality-option-btn" data-height="1080" data-bitrate="12000000">1080p</button>
+            </div>
+            <button type="button" id="cancelQualityBtn" class="quality-cancel-btn">Cancelar</button>
+        </div>
+    </div>
+
     <div id="exportModal" class="hidden" style="position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.8); z-index:9999; display:flex; justify-content:center; align-items:center; flex-direction:column; color:white;">
         <h2>Exportando video...</h2>
         <p id="exportProgress">0%</p>
