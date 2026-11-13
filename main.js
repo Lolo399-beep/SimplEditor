@@ -151,6 +151,7 @@ function serializeRows() {
                 volume: el._clip.volume ?? 1,
                 locked: !!el._clip.locked,
                 tf: el._clip.tf ? { ...el._clip.tf } : null,
+                cropMaskSaved: el._clip.cropMaskSaved ? el._clip.cropMaskSaved.map(poly => poly.map(p => ({ ...p }))) : null,
                 txt: el._clip.txt ? { ...el._clip.txt } : undefined   // Textos: contenido y formato
             }))
     }));
@@ -370,6 +371,8 @@ function buildRows(rowsData, project) {
             if (c.volume != null) clip.volume = c.volume;
             clip.locked = !!c.locked;
             clip.tf = c.tf ? { ...c.tf } : null;
+            clip.cropMaskSaved = c.cropMaskSaved ? c.cropMaskSaved.map(poly => poly.map(p => ({ ...p }))) : null;
+            if (clip.type === 'image') rebuildImageCropSurface(clip);
             if (c.txt) clip.txt = { ...c.txt };
             placeClip(row, clip);
             drawClipFilmstrip(clip, true);
@@ -746,6 +749,7 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
     <div class="context-menu-item" data-action="volume">Alterar volumen</div>
+    <div class="context-menu-item" data-action="manual-crop">Recortar manualmente</div>
     <div class="context-menu-item" data-action="filter-popup">Filtros...</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
@@ -763,7 +767,9 @@ clipMenu.addEventListener('click', (e) => {
     const item = e.target.closest('.context-menu-item');
     if (!item || !clipTarget || item.classList.contains('disabled')) return;
 
-    if (item.dataset.action === 'filter-popup') {
+    if (item.dataset.action === 'manual-crop') {
+        openManualCropModal(clipTarget);
+    } else if (item.dataset.action === 'filter-popup') {
         openFilterPopup(clipTarget, item);
     }
     // ... resto de manejadores del clipMenu existentes ...
@@ -1427,6 +1433,8 @@ function showClipContextMenu(x, y, clip) {
     if (clip.type === 'text') { showTextContextMenu(x, y, clip); return; }
 
     const isImage = clip.type === 'image';
+    const manualCropItem = clipMenu.querySelector('[data-action="manual-crop"]');
+    if (manualCropItem) manualCropItem.style.display = isImage ? 'block' : 'none';
     clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="volume"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
     const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
     const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
@@ -2038,9 +2046,10 @@ function drawClipFilmstrip(clip, force = false) {
         if (cv.width !== w) cv.width = w;
         if (cv.height !== THUMB_H) cv.height = THUMB_H;
         ctx.fillStyle = '#202020'; ctx.fillRect(0, 0, cv.width, cv.height);
-        if (clip.image && clip.image.complete) {
+        const imgSrc = getImageDrawable(clip);
+        if (imgSrc) {
             const tileW = Math.max(1, Math.round(THUMB_H * clip.aspect));
-            for (let x = 0; x < cv.width; x += tileW) ctx.drawImage(clip.image, x, 0, Math.min(tileW, cv.width - x), THUMB_H);
+            for (let x = 0; x < cv.width; x += tileW) ctx.drawImage(imgSrc, x, 0, Math.min(tileW, cv.width - x), THUMB_H);
             applyEffectsToFilmstrip(clip, ctx, cv.width, cv.height);
         }
         return;
@@ -2089,6 +2098,7 @@ function updateClipBadge(clip) {
     if (clip.chroma === 'green') parts.push('Pantalla verde');
     if (clip.chroma === 'blue') parts.push('Pantalla azul');
     if (clip.chroma === 'checker') parts.push('Fondo a cuadros');
+    if (clip.cropMaskSaved && clip.cropMaskSaved.length > 0) parts.push('Recortado');
     if (clip.filterType && clip.filterType !== 'none') parts.push(`Filtro: ${clip.filterType} (${clip.intensity ?? 100}%)`);
     if (clip.muted) parts.push('Silenciado');
     if (clip.volume != null && clip.volume < 1) parts.push(`Vol. ${Math.round(clip.volume * 100)}%`);
@@ -2614,8 +2624,8 @@ function renderComposite(ctx) {
             source = textSurface(clip);
             if (!source) return;
         } else if (clip.type === 'image') {
-            const img = clip.image;
-            if (!img || !img.complete || !img.naturalWidth) return;
+            const img = getImageDrawable(clip);
+            if (!img) return;
             source = img;
         } else {
             const v = clip.video;
@@ -4181,6 +4191,8 @@ function createFragmentClip(parent, video) {
         intensity: parent.intensity,
         adjustments: getClipAdjustments(parent),
         tf: parent.tf ? { ...parent.tf } : null,   // Las dos mitades de un corte conservan la posición / tamaño
+        cropMaskSaved: parent.cropMaskSaved ? parent.cropMaskSaved.map(poly => poly.map(p => ({ ...p }))) : null,
+        croppedCanvas: parent.croppedCanvas || null,
         muted: parent.muted,
         volume: parent.volume ?? 1,   // Las dos mitades de un corte conservan el volumen
         locked: false,
@@ -4926,3 +4938,518 @@ function applyClipAdjustments(ctx, clip, fit, canvasW, canvasH) {
 // --- Inicio ---
 setTimelineWidth(500);
 updatePlayhead();
+
+// =====================================================================
+//  Recorte Manual tipo Pluma / Lazo Poligonal (solo imágenes)
+//  - Soporta modo normal (conserva lo de adentro y borra lo de afuera) y
+//    modo "Invertir área de recorte" (borra lo de adentro del área marcada
+//    y conserva el resto, ideal para recortes sucesivos o huecos).
+//  - Moverse (pan) con el clic derecho sostenido y arrastrar.
+//  - Zoom con la rueda del mouse hacia el cursor.
+// =====================================================================
+function getImageDrawable(clip) {
+    if (!clip || clip.type !== 'image') return null;
+    if (clip.croppedCanvas) return clip.croppedCanvas;
+    const img = clip.image;
+    if (!img || !img.complete || !img.naturalWidth) return null;
+    return img;
+}
+
+function rebuildImageCropSurface(clip) {
+    // Las operaciones de recorte se acumulan directamente en clip.croppedCanvas.
+}
+
+const manualCropModal = document.createElement('div');
+manualCropModal.className = 'manual-crop-modal hidden';
+manualCropModal.innerHTML = `
+    <div class="manual-crop-header">
+        <h3>Recortar manualmente</h3>
+        <span class="manual-crop-hint">Clic izquierdo: poner punto · Clic derecho sostenido: mover imagen · Rueda: zoom</span>
+    </div>
+    <div class="manual-crop-stage" id="manualCropStage">
+        <canvas id="manualCropCanvas"></canvas>
+    </div>
+    <div class="manual-crop-footer">
+        <div class="manual-crop-actions-left">
+            <button type="button" id="cropInvertBtn" class="crop-btn invert-toggle">Invertir área de recorte</button>
+            <button type="button" id="cropUndoPointBtn" class="crop-btn">Deshacer punto</button>
+            <button type="button" id="cropClearPointsBtn" class="crop-btn">Limpiar puntos</button>
+            <button type="button" id="cropResetZoomBtn" class="crop-btn">Zoom 100%</button>
+            <button type="button" id="cropRestoreOriginalBtn" class="crop-btn danger">Restaurar imagen original</button>
+        </div>
+        <div class="manual-crop-actions-right">
+            <button type="button" id="cropCancelBtn" class="crop-btn danger">Cancelar</button>
+            <button type="button" id="cropAcceptBtn" class="crop-btn primary">Aceptar</button>
+        </div>
+    </div>
+`;
+document.body.appendChild(manualCropModal);
+
+const manualCropStage = document.getElementById('manualCropStage');
+const manualCropCanvas = document.getElementById('manualCropCanvas');
+const mcCtx = manualCropCanvas.getContext('2d');
+const cropInvertBtn = document.getElementById('cropInvertBtn');
+const cropUndoPointBtn = document.getElementById('cropUndoPointBtn');
+const cropClearPointsBtn = document.getElementById('cropClearPointsBtn');
+const cropResetZoomBtn = document.getElementById('cropResetZoomBtn');
+const cropRestoreOriginalBtn = document.getElementById('cropRestoreOriginalBtn');
+const cropCancelBtn = document.getElementById('cropCancelBtn');
+const cropAcceptBtn = document.getElementById('cropAcceptBtn');
+
+let cropTargetClip = null;
+let cropWorkingCanvas = null;
+let draftCropPoints = [];
+let invertCropArea = false; // false = conserva adentro (recorta afuera); true = recorta adentro (conserva afuera)
+let draggingPointIdx = -1;
+let hoverPointIdx = -1;
+let hoverInsertIdx = -1;
+let hoverInsertPt = null;
+let pointerNormPos = null;
+
+// Estado de zoom y desplazamiento (pan)
+let cropZoom = 1;
+let cropPanX = 0;
+let cropPanY = 0;
+let isPanningCrop = false;
+let panStartClientX = 0;
+let panStartClientY = 0;
+let panOriginX = 0;
+let panOriginY = 0;
+
+function applyCropCanvasTransform() {
+    manualCropCanvas.style.transform = `translate(${cropPanX}px, ${cropPanY}px) scale(${cropZoom})`;
+}
+
+function resetCropView() {
+    cropZoom = 1;
+    cropPanX = 0;
+    cropPanY = 0;
+    applyCropCanvasTransform();
+}
+
+function syncInvertButtonUI() {
+    cropInvertBtn.classList.toggle('active', invertCropArea);
+}
+
+cropInvertBtn.addEventListener('click', () => {
+    invertCropArea = !invertCropArea;
+    syncInvertButtonUI();
+    drawManualCropEditor();
+});
+
+function openManualCropModal(clip) {
+    if (!clip || clip.type !== 'image' || clip.locked || !clip.image || !clip.image.complete) return;
+    pause();
+    hideMenus();
+    cropTargetClip = clip;
+
+    const nw = clip.image.naturalWidth;
+    const nh = clip.image.naturalHeight;
+
+    cropWorkingCanvas = document.createElement('canvas');
+    cropWorkingCanvas.width = nw;
+    cropWorkingCanvas.height = nh;
+    const wCtx = cropWorkingCanvas.getContext('2d');
+    if (clip.croppedCanvas) {
+        wCtx.drawImage(clip.croppedCanvas, 0, 0);
+    } else {
+        wCtx.drawImage(clip.image, 0, 0);
+    }
+
+    draftCropPoints = [];
+    invertCropArea = false;
+    syncInvertButtonUI();
+    draggingPointIdx = -1;
+    hoverPointIdx = -1;
+    hoverInsertIdx = -1;
+    hoverInsertPt = null;
+    pointerNormPos = null;
+
+    const scale = Math.min(1, 1600 / Math.max(nw, nh));
+    manualCropCanvas.width = Math.max(1, Math.round(nw * scale));
+    manualCropCanvas.height = Math.max(1, Math.round(nh * scale));
+
+    const hasPreviousCrops = !!clip.croppedCanvas;
+    cropRestoreOriginalBtn.style.display = hasPreviousCrops ? 'inline-block' : 'none';
+
+    resetCropView();
+    manualCropModal.classList.remove('hidden');
+    drawManualCropEditor();
+}
+
+function closeManualCropModal() {
+    manualCropModal.classList.add('hidden');
+    cropTargetClip = null;
+    cropWorkingCanvas = null;
+    draggingPointIdx = -1;
+    isPanningCrop = false;
+}
+
+manualCropStage.addEventListener('wheel', (e) => {
+    if (manualCropModal.classList.contains('hidden')) return;
+    e.preventDefault();
+
+    const rect = manualCropCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const oldZoom = cropZoom;
+    const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+    const newZoom = Math.min(12, Math.max(0.5, oldZoom * factor));
+    if (newZoom === oldZoom) return;
+
+    const stageRect = manualCropStage.getBoundingClientRect();
+    const stageCenterX = stageRect.left + stageRect.width / 2;
+    const stageCenterY = stageRect.top + stageRect.height / 2;
+
+    const cursorOffsetX = e.clientX - stageCenterX;
+    const cursorOffsetY = e.clientY - stageCenterY;
+
+    const ratio = newZoom / oldZoom;
+    cropPanX = cursorOffsetX - (cursorOffsetX - cropPanX) * ratio;
+    cropPanY = cursorOffsetY - (cursorOffsetY - cropPanY) * ratio;
+    cropZoom = newZoom;
+
+    applyCropCanvasTransform();
+    drawManualCropEditor();
+}, { passive: false });
+
+cropResetZoomBtn.addEventListener('click', () => {
+    resetCropView();
+    drawManualCropEditor();
+});
+
+cropRestoreOriginalBtn.addEventListener('click', () => {
+    if (!cropTargetClip || !cropTargetClip.image) return;
+    cropTargetClip.croppedCanvas = null;
+    const nw = cropTargetClip.image.naturalWidth;
+    const nh = cropTargetClip.image.naturalHeight;
+    cropWorkingCanvas = document.createElement('canvas');
+    cropWorkingCanvas.width = nw;
+    cropWorkingCanvas.height = nh;
+    cropWorkingCanvas.getContext('2d').drawImage(cropTargetClip.image, 0, 0);
+    draftCropPoints = [];
+    cropRestoreOriginalBtn.style.display = 'none';
+    drawManualCropEditor();
+});
+
+function eventToNormCoords(e) {
+    const rect = manualCropCanvas.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    return { x, y };
+}
+
+function findPointNear(normPt, radiusPx = 10) {
+    const rect = manualCropCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return -1;
+    let best = -1;
+    let bestDist = radiusPx;
+    draftCropPoints.forEach((p, idx) => {
+        const dx = (p.x - normPt.x) * rect.width;
+        const dy = (p.y - normPt.y) * rect.height;
+        const d = Math.hypot(dx, dy);
+        if (d <= bestDist) {
+            bestDist = d;
+            best = idx;
+        }
+    });
+    return best;
+}
+
+function findSegmentNear(normPt, radiusPx = 7) {
+    if (draftCropPoints.length < 2) return null;
+    const rect = manualCropCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const px = normPt.x * rect.width;
+    const py = normPt.y * rect.height;
+    const count = draftCropPoints.length >= 3 ? draftCropPoints.length : draftCropPoints.length - 1;
+    let best = null;
+    let bestDist = radiusPx;
+
+    for (let i = 0; i < count; i++) {
+        const a = draftCropPoints[i];
+        const b = draftCropPoints[(i + 1) % draftCropPoints.length];
+        const ax = a.x * rect.width, ay = a.y * rect.height;
+        const bx = b.x * rect.width, by = b.y * rect.height;
+        const abx = bx - ax, aby = by - ay;
+        const len2 = abx * abx + aby * aby;
+        if (len2 === 0) continue;
+        const t = Math.max(0.05, Math.min(0.95, ((px - ax) * abx + (py - ay) * aby) / len2));
+        const projX = ax + t * abx;
+        const projY = ay + t * aby;
+        const d = Math.hypot(px - projX, py - projY);
+        if (d <= bestDist) {
+            bestDist = d;
+            best = { index: i + 1, pt: { x: projX / rect.width, y: projY / rect.height } };
+        }
+    }
+    return best;
+}
+
+function drawManualCropEditor() {
+    if (!cropTargetClip || !cropWorkingCanvas) return;
+    const w = manualCropCanvas.width;
+    const h = manualCropCanvas.height;
+    const img = cropWorkingCanvas;
+
+    mcCtx.clearRect(0, 0, w, h);
+
+    if (draftCropPoints.length >= 3) {
+        if (!invertCropArea) {
+            // Modo normal: lo de afuera se atenúa, lo de adentro queda nítido
+            mcCtx.save();
+            mcCtx.globalAlpha = 0.35;
+            mcCtx.drawImage(img, 0, 0, w, h);
+            mcCtx.restore();
+
+            mcCtx.save();
+            mcCtx.beginPath();
+            draftCropPoints.forEach((p, idx) => {
+                if (idx === 0) mcCtx.moveTo(p.x * w, p.y * h);
+                else mcCtx.lineTo(p.x * w, p.y * h);
+            });
+            mcCtx.closePath();
+            mcCtx.clip();
+            mcCtx.drawImage(img, 0, 0, w, h);
+            mcCtx.restore();
+        } else {
+            // Modo invertido: se conserva lo de afuera y se muestra el interior como zona a eliminar
+            mcCtx.drawImage(img, 0, 0, w, h);
+
+            mcCtx.save();
+            mcCtx.beginPath();
+            draftCropPoints.forEach((p, idx) => {
+                if (idx === 0) mcCtx.moveTo(p.x * w, p.y * h);
+                else mcCtx.lineTo(p.x * w, p.y * h);
+            });
+            mcCtx.closePath();
+            mcCtx.clip();
+            mcCtx.clearRect(0, 0, w, h);
+            mcCtx.globalAlpha = 0.25;
+            mcCtx.drawImage(img, 0, 0, w, h);
+            mcCtx.fillStyle = 'rgba(255, 77, 77, 0.22)';
+            mcCtx.fillRect(0, 0, w, h);
+            mcCtx.restore();
+        }
+    } else {
+        mcCtx.drawImage(img, 0, 0, w, h);
+    }
+
+    // Trazado y nodos
+    if (draftCropPoints.length > 0) {
+        const invZoom = 1 / Math.max(1, cropZoom);
+        mcCtx.save();
+        mcCtx.strokeStyle = invertCropArea ? '#ff4d4d' : '#38b6ff';
+        mcCtx.lineWidth = Math.max(1.5, (w / 450) * invZoom);
+        mcCtx.beginPath();
+        draftCropPoints.forEach((p, idx) => {
+            if (idx === 0) mcCtx.moveTo(p.x * w, p.y * h);
+            else mcCtx.lineTo(p.x * w, p.y * h);
+        });
+        if (draftCropPoints.length >= 3) {
+            mcCtx.closePath();
+        } else if (pointerNormPos) {
+            mcCtx.lineTo(pointerNormPos.x * w, pointerNormPos.y * h);
+        }
+        mcCtx.stroke();
+
+        if (draftCropPoints.length >= 3 && hoverPointIdx === -1 && hoverInsertIdx !== -1 && hoverInsertPt) {
+            const r = Math.max(3, (w / 220) * invZoom);
+            mcCtx.fillStyle = invertCropArea ? '#ff4d4d' : '#38b6ff';
+            mcCtx.beginPath();
+            mcCtx.arc(hoverInsertPt.x * w, hoverInsertPt.y * h, r, 0, Math.PI * 2);
+            mcCtx.fill();
+        }
+
+        const nodeSize = Math.max(5, Math.round((w / 130) * invZoom));
+        draftCropPoints.forEach((p, idx) => {
+            const px = p.x * w;
+            const py = p.y * h;
+            const isFirst = idx === 0;
+            const isHovered = idx === hoverPointIdx;
+            mcCtx.fillStyle = isHovered ? '#ffffff' : (isFirst ? '#7dff9b' : (invertCropArea ? '#ff4d4d' : '#38b6ff'));
+            mcCtx.strokeStyle = '#000000';
+            mcCtx.lineWidth = Math.max(1, nodeSize / 5);
+            mcCtx.fillRect(px - nodeSize / 2, py - nodeSize / 2, nodeSize, nodeSize);
+            mcCtx.strokeRect(px - nodeSize / 2, py - nodeSize / 2, nodeSize, nodeSize);
+        });
+        mcCtx.restore();
+    }
+}
+
+manualCropStage.addEventListener('pointerdown', (e) => {
+    if (!cropTargetClip) return;
+
+    // Clic derecho (e.button === 2) para mover (pan) la imagen sin hacer zoom ni marcar puntos
+    if (e.button === 2) {
+        e.preventDefault();
+        isPanningCrop = true;
+        panStartClientX = e.clientX;
+        panStartClientY = e.clientY;
+        panOriginX = cropPanX;
+        panOriginY = cropPanY;
+        manualCropCanvas.style.cursor = 'grabbing';
+        manualCropStage.setPointerCapture(e.pointerId);
+        return;
+    }
+
+    if (e.target !== manualCropCanvas || e.button !== 0) return;
+    e.preventDefault();
+    const norm = eventToNormCoords(e);
+    const hitIdx = findPointNear(norm, 12);
+
+    if (hitIdx !== -1) {
+        draggingPointIdx = hitIdx;
+        manualCropStage.setPointerCapture(e.pointerId);
+    } else if (hoverInsertIdx !== -1 && hoverInsertPt) {
+        draftCropPoints.splice(hoverInsertIdx, 0, { ...hoverInsertPt });
+        draggingPointIdx = hoverInsertIdx;
+        hoverInsertIdx = -1;
+        manualCropStage.setPointerCapture(e.pointerId);
+    } else {
+        draftCropPoints.push(norm);
+        draggingPointIdx = draftCropPoints.length - 1;
+        manualCropStage.setPointerCapture(e.pointerId);
+    }
+    drawManualCropEditor();
+});
+
+manualCropStage.addEventListener('pointermove', (e) => {
+    if (!cropTargetClip) return;
+
+    if (isPanningCrop) {
+        cropPanX = panOriginX + (e.clientX - panStartClientX);
+        cropPanY = panOriginY + (e.clientY - panStartClientY);
+        applyCropCanvasTransform();
+        return;
+    }
+
+    const norm = eventToNormCoords(e);
+    pointerNormPos = norm;
+
+    if (draggingPointIdx !== -1) {
+        draftCropPoints[draggingPointIdx] = norm;
+        manualCropCanvas.style.cursor = 'grabbing';
+        drawManualCropEditor();
+        return;
+    }
+
+    hoverPointIdx = findPointNear(norm, 12);
+    if (hoverPointIdx !== -1) {
+        hoverInsertIdx = -1;
+        hoverInsertPt = null;
+        manualCropCanvas.style.cursor = 'grab';
+    } else {
+        const seg = findSegmentNear(norm, 8);
+        if (seg && draftCropPoints.length >= 3) {
+            hoverInsertIdx = seg.index;
+            hoverInsertPt = seg.pt;
+            manualCropCanvas.style.cursor = 'copy';
+        } else {
+            hoverInsertIdx = -1;
+            hoverInsertPt = null;
+            manualCropCanvas.style.cursor = 'crosshair';
+        }
+    }
+    drawManualCropEditor();
+});
+
+manualCropStage.addEventListener('pointerup', (e) => {
+    if (isPanningCrop) {
+        isPanningCrop = false;
+        try { manualCropStage.releasePointerCapture(e.pointerId); } catch (_) {}
+        manualCropCanvas.style.cursor = 'crosshair';
+    }
+    if (draggingPointIdx !== -1) {
+        draggingPointIdx = -1;
+        try { manualCropStage.releasePointerCapture(e.pointerId); } catch (_) {}
+        drawManualCropEditor();
+    }
+});
+
+manualCropStage.addEventListener('contextmenu', (e) => e.preventDefault());
+
+cropUndoPointBtn.addEventListener('click', () => {
+    if (draftCropPoints.length > 0) {
+        draftCropPoints.pop();
+        drawManualCropEditor();
+    }
+});
+
+cropClearPointsBtn.addEventListener('click', () => {
+    draftCropPoints = [];
+    drawManualCropEditor();
+});
+
+cropCancelBtn.addEventListener('click', closeManualCropModal);
+
+cropAcceptBtn.addEventListener('click', () => {
+    if (!cropTargetClip || !cropWorkingCanvas) return;
+
+    const nw = cropTargetClip.image.naturalWidth;
+    const nh = cropTargetClip.image.naturalHeight;
+
+    if (draftCropPoints.length >= 3) {
+        const newCv = document.createElement('canvas');
+        newCv.width = nw;
+        newCv.height = nh;
+        const ctx = newCv.getContext('2d');
+        ctx.clearRect(0, 0, nw, nh);
+
+        if (!invertCropArea) {
+            // Normal: conserva lo que está DENTRO del polígono
+            ctx.save();
+            ctx.beginPath();
+            draftCropPoints.forEach((p, idx) => {
+                const px = p.x * nw;
+                const py = p.y * nh;
+                if (idx === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            });
+            ctx.closePath();
+            ctx.clip();
+            ctx.drawImage(cropWorkingCanvas, 0, 0, nw, nh);
+            ctx.restore();
+        } else {
+            // Invertido: conserva toda la imagen y borra (recorta) lo que está DENTRO del polígono
+            ctx.drawImage(cropWorkingCanvas, 0, 0, nw, nh);
+            ctx.save();
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.beginPath();
+            draftCropPoints.forEach((p, idx) => {
+                const px = p.x * nw;
+                const py = p.y * nh;
+                if (idx === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            });
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+
+        cropTargetClip.croppedCanvas = newCv;
+    } else {
+        cropTargetClip.croppedCanvas = cropWorkingCanvas;
+    }
+
+    updateClipBadge(cropTargetClip);
+    drawClipFilmstrip(cropTargetClip, true);
+    commit();
+    refreshPreview();
+    closeManualCropModal();
+});
+
+document.addEventListener('keydown', (e) => {
+    if (manualCropModal.classList.contains('hidden')) return;
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        closeManualCropModal();
+    } else if (e.key === 'Enter') {
+        e.preventDefault();
+        cropAcceptBtn.click();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        cropUndoPointBtn.click();
+    }
+}, true);
