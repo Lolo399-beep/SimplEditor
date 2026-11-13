@@ -1497,3 +1497,136 @@ body.trim-mode .ruler {
     align-items: stretch;
     gap: 6px;
 }
+
+/* --- Modal de Recorte Manual (Pluma / Lazo Poligonal) --- */
+.manual-crop-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.92);
+    z-index: 10050;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    user-select: none;
+}
+
+.manual-crop-header {
+    width: 100%;
+    max-width: 1100px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    color: #ffffff;
+}
+
+.manual-crop-header h3 {
+    font-size: 1.2rem;
+    font-weight: 400;
+}
+
+.manual-crop-hint {
+    font-size: 0.85rem;
+    color: #aaaaaa;
+}
+
+.manual-crop-stage {
+    position: relative;
+    flex: 1;
+    width: 100%;
+    max-width: 1100px;
+    max-height: calc(100vh - 150px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #444444;
+    background-color: #0b0b0b;
+    background-image:
+        linear-gradient(45deg, #161616 25%, transparent 25%),
+        linear-gradient(-45deg, #161616 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #161616 75%),
+        linear-gradient(-45deg, transparent 75%, #161616 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+    overflow: hidden;
+}
+
+.manual-crop-stage canvas {
+    max-width: 100%;
+    max-height: 100%;
+    cursor: crosshair;
+    display: block;
+    transform-origin: center center;
+    will-change: transform;
+}
+
+.manual-crop-footer {
+    width: 100%;
+    max-width: 1100px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 14px;
+    gap: 12px;
+}
+
+.manual-crop-actions-left,
+.manual-crop-actions-right {
+    display: flex;
+    gap: 10px;
+}
+
+.crop-btn {
+    background: transparent;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 8px 18px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s;
+}
+
+.crop-btn:hover {
+    background: #ffffff;
+    color: #000000;
+}
+
+.crop-btn.primary {
+    border-color: #38b6ff;
+    color: #38b6ff;
+}
+
+.crop-btn.primary:hover {
+    background: #38b6ff;
+    color: #000000;
+}
+
+.crop-btn.danger {
+    border-color: #ff4d4d;
+    color: #ff4d4d;
+}
+
+.crop-btn.danger:hover {
+    background: #ff4d4d;
+    color: #ffffff;
+}
+
+
+.crop-btn.invert-toggle {
+    background-color: #ffffff;
+    color: #000000;
+    border: 1px solid #ffffff;
+    font-weight: 500;
+}
+
+.crop-btn.invert-toggle:hover {
+    opacity: 0.9;
+}
+
+.crop-btn.invert-toggle.active {
+    background-color: #000000;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+}
