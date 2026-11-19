@@ -1630,3 +1630,60 @@ body.trim-mode .ruler {
     color: #ffffff;
     border: 1px solid #ffffff;
 }
+
+/* --- Modo filtros (por región / tramo en la línea de tiempo) --- */
+.filter-selection {
+    position: absolute;
+    display: none;
+    background-color: rgba(56, 182, 255, 0.25);
+    border: 1px dashed #38b6ff;
+    pointer-events: none;
+    z-index: 35;
+}
+
+.filter-selection-label {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    padding: 0 5px;
+    font-size: 11px;
+    line-height: 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background-color: #38b6ff;
+    color: #000000;
+    white-space: nowrap;
+}
+
+.filter-banner {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    padding: 10px 18px;
+    background-color: #000000;
+    border: 1px solid #38b6ff;
+    color: #ffffff;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 900;
+}
+
+body.filter-mode .rows-container,
+body.filter-mode .row-item {
+    cursor: crosshair;
+}
+
+body.filter-mode .clip {
+    pointer-events: none;
+    cursor: crosshair;
+}
+
+body.filter-mode .row-grip,
+body.filter-mode .row-handle {
+    pointer-events: none;
+}
+
+body.filter-mode .ruler {
+    cursor: not-allowed;
+}
