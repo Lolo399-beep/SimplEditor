@@ -749,6 +749,7 @@ document.getElementById('deleteProjectOption').addEventListener('click', () => {
 const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="toggle-mute">Silenciar</div>
     <div class="context-menu-item" data-action="volume">Alterar volumen</div>
+    <div class="context-menu-item" data-action="copy-clip">Copiar</div>
     <div class="context-menu-item" data-action="manual-crop">Recortar manualmente</div>
     <div class="context-menu-item" data-action="filter-popup">Filtros...</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
@@ -767,7 +768,9 @@ clipMenu.addEventListener('click', (e) => {
     const item = e.target.closest('.context-menu-item');
     if (!item || !clipTarget || item.classList.contains('disabled')) return;
 
-    if (item.dataset.action === 'manual-crop') {
+    if (item.dataset.action === 'copy-clip') {
+        duplicateClipToNewRow(clipTarget);
+    } else if (item.dataset.action === 'manual-crop') {
         openManualCropModal(clipTarget);
     } else if (item.dataset.action === 'filter-popup') {
         openFilterPopup(clipTarget, item);
@@ -1144,6 +1147,7 @@ document.addEventListener('pointerdown', (e) => {
 
 // --- Menú de textos (clic derecho) ----------------------------------------
 const textMenu = createMenu(`
+    <div class="context-menu-item" data-action="copy-clip">Copiar</div>
     <div class="context-menu-item" data-action="edit-text">Editar texto...</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
@@ -1169,7 +1173,8 @@ textMenu.addEventListener('click', (e) => {
     if (!item || !clipTarget || item.classList.contains('disabled')) return;
 
     const action = item.dataset.action;
-    if (action === 'edit-text') openTextPopup(clipTarget);
+    if (action === 'copy-clip') duplicateClipToNewRow(clipTarget);
+    else if (action === 'edit-text') openTextPopup(clipTarget);
     else if (action === 'toggle-lock') setClipLocked(clipTarget, !clipTarget.locked);
     else if (action === 'trim-mode') toggleTrimMode();
     else if (action === 'reset-transform') resetClipTransform(clipTarget);
@@ -1435,6 +1440,8 @@ function showClipContextMenu(x, y, clip) {
     const isImage = clip.type === 'image';
     const manualCropItem = clipMenu.querySelector('[data-action="manual-crop"]');
     if (manualCropItem) manualCropItem.style.display = isImage ? 'block' : 'none';
+    const copyItem = clipMenu.querySelector('[data-action="copy-clip"]');
+    if (copyItem) copyItem.style.display = isImage ? 'block' : 'none';
     clipMenu.querySelectorAll('[data-action="toggle-mute"], [data-action="volume"], [data-action="toggle-lock"], [data-action="trim-mode"], [data-action="rethumb"]').forEach(item => item.style.display = isImage ? 'none' : 'block');
     const muteItem = clipMenu.querySelector('[data-action="toggle-mute"]');
     const lockItem = clipMenu.querySelector('[data-action="toggle-lock"]');
@@ -5453,3 +5460,77 @@ document.addEventListener('keydown', (e) => {
         cropUndoPointBtn.click();
     }
 }, true);
+
+// =====================================================================
+//  Copiar y pegar imágenes recortadas y textos en una fila nueva
+// =====================================================================
+function cloneCanvasElement(srcCanvas) {
+    if (!srcCanvas) return null;
+    const copy = document.createElement('canvas');
+    copy.width = srcCanvas.width;
+    copy.height = srcCanvas.height;
+    copy.getContext('2d').drawImage(srcCanvas, 0, 0);
+    return copy;
+}
+
+function duplicateClipToNewRow(clip) {
+    if (!clip || !currentProjectId || trimBusy || exporting) return;
+    if (clip.type !== 'image' && clip.type !== 'text') return;
+
+    const project = currentProject();
+    const isText = clip.type === 'text';
+
+    const copy = {
+        id: `${isText ? 'text' : 'image'}_${Date.now()}_${++clipSeq}`,
+        type: clip.type,
+        name: clip.name,
+        url: clip.url,
+        image: clip.image || null,
+        video: null,
+        duration: clip.duration,
+        aspect: clip.aspect,
+        source: null,
+        srcStart: 0,
+        start: clip.start,
+        chroma: clip.chroma || 'none',
+        chromaManual: !!clip.chromaManual,
+        filterType: clip.filterType || 'none',
+        intensity: clip.intensity ?? 100,
+        adjustments: getClipAdjustments(clip),
+        tf: clip.tf ? { ...clip.tf } : null,
+        cropMaskSaved: clip.cropMaskSaved
+            ? clip.cropMaskSaved.map(poly => poly.map(p => ({ ...p })))
+            : null,
+        croppedCanvas: clip.croppedCanvas ? cloneCanvasElement(clip.croppedCanvas) : null,
+        muted: !!clip.muted,
+        locked: false,
+        el: null,
+        thumbs: null,
+        thumbCtx: null,
+        thumbKey: '',
+        disposed: false,
+        badge: null
+    };
+
+    if (isText && clip.txt) {
+        copy.txt = { ...clip.txt };
+        copy.textCanvas = null;
+        copy.textKey = '';
+        copy.textSS = clip.textSS || TEXT_SS;
+    }
+
+    project.clips[copy.id] = copy;
+
+    // Crear una fila nueva arriba y heredar si la fila original tenía desplazamiento habilitado
+    const newRow = createRowElement(true);
+    const sourceRow = clip.el && clip.el.parentElement;
+    if (sourceRow && sourceRow.classList.contains('movable')) {
+        newRow.classList.add('movable');
+    }
+
+    placeClip(newRow, copy);
+    drawClipFilmstrip(copy, true);
+    fitTimeline();
+    commit();
+    refreshPreview();
+}
