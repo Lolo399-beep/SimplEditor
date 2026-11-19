@@ -114,6 +114,7 @@ let renderQueued = false;
 
 // Modo recortes
 let trimMode = false;       // true mientras el modo recortes está activo (la línea de tiempo queda inmóvil)
+let filterMode = false;     // true mientras el Modo color está activo
 let trimBusy = false;       // true mientras se aplica un corte
 let renderFrozen = false;   // true mientras se prepara un corte: la vista previa conserva su último cuadro
 
@@ -205,10 +206,11 @@ function commit() {
 document.addEventListener('keydown', (e) => {
     if (!currentProjectId || exporting) return; // Solo dentro de un proyecto (y no mientras se exporta)
 
-    // Esc sale del modo recortes
-    if (e.key === 'Escape' && trimMode) {
+    // Esc sale del modo recortes o Modo color
+    if (e.key === 'Escape' && (trimMode || filterMode)) {
         e.preventDefault();
         exitTrimMode();
+        exitFilterMode();
         return;
     }
 
@@ -234,6 +236,7 @@ redoBtn.addEventListener('click', redo);
 function showMainView(pushToHistory = true) {
     closeTextPopup();
     exitTrimMode();
+    exitFilterMode();
     stopPlayback();
     saveCurrentProjectRows();
 
@@ -395,7 +398,7 @@ function createRowElement(atTop = false) {
     grip.className = 'row-grip';
     grip.title = 'Arrastra para cambiar la jerarquía (arriba = por encima)';
     grip.textContent = '⋮⋮';
-    grip.addEventListener('mousedown', () => { if (trimMode) return; row.draggable = true; });
+    grip.addEventListener('mousedown', () => { if (trimMode || filterMode) return; row.draggable = true; });
     grip.addEventListener('mouseup', () => { row.draggable = false; });
 
     const handleLeft = document.createElement('div');
@@ -456,7 +459,7 @@ function createRowElement(atTop = false) {
 // Redimensionamiento de la línea de tiempo (Estiramiento y Acortamiento)
 function setupResizeHandlers(leftHandle, rightHandle) {
     const initResize = (e, direction) => {
-        if (trimMode) return; // En modo recortes la línea de tiempo no se mueve ni se estira
+        if (trimMode || filterMode) return; // En modo recortes o filtros la línea de tiempo no se mueve ni se estira
         e.preventDefault();
         const startX = e.clientX;
         const startWidth = rowsContainer.offsetWidth;
@@ -529,7 +532,7 @@ function fitTimeline() {
 
 // Click / arrastre sobre la regla para moverse en el tiempo
 ruler.addEventListener('pointerdown', (e) => {
-    if (!currentProjectId || trimMode) return; // En modo recortes el cabezal no se mueve
+    if (!currentProjectId || trimMode || filterMode) return; // En modo recortes o filtros el cabezal no se mueve
     e.preventDefault();
 
     const seekTo = (ev) => {
@@ -582,6 +585,7 @@ const contextMenu = createMenu(`
     <div class="context-menu-item" id="lockRowOption">Bloquear</div>
     <div class="context-menu-item" id="moveRowOption">Habilitar desplazamiento</div>
     <div class="context-menu-item" id="trimModeOption">Modo recortes</div>
+    <div class="context-menu-item" id="filterModeOption">Modo color</div>
     <div class="context-menu-item danger" id="deleteRowOption">Borrar</div>
 `);
 
@@ -600,6 +604,8 @@ function showContextMenu(x, y, row) {
         row.classList.contains('movable') ? 'Deshabilitar desplazamiento' : 'Habilitar desplazamiento';
     document.getElementById('trimModeOption').textContent =
         trimMode ? 'Salir del modo recortes' : 'Modo recortes';
+    document.getElementById('filterModeOption').textContent =
+        filterMode ? 'Salir del modo color' : 'Modo color';
 
     openMenu(contextMenu, x, y);
 }
@@ -638,6 +644,10 @@ document.getElementById('deleteRowOption').addEventListener('click', () => {
 
 document.getElementById('trimModeOption').addEventListener('click', () => {
     toggleTrimMode();
+});
+
+document.getElementById('filterModeOption').addEventListener('click', () => {
+    toggleFilterMode();
 });
 
 // "Habilitar / Deshabilitar desplazamiento": las capas de esta fila se pueden mover, escalar y girar
@@ -751,7 +761,8 @@ const clipMenu = createMenu(`
     <div class="context-menu-item" data-action="volume">Alterar volumen</div>
     <div class="context-menu-item" data-action="copy-clip">Copiar</div>
     <div class="context-menu-item" data-action="manual-crop">Recortar manualmente</div>
-    <div class="context-menu-item" data-action="filter-popup">Filtros...</div>
+    <div class="context-menu-item" data-action="filter-popup">Color</div>
+    <div class="context-menu-item" data-action="filter-mode">Modo color</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-separator"></div>
@@ -774,6 +785,8 @@ clipMenu.addEventListener('click', (e) => {
         openManualCropModal(clipTarget);
     } else if (item.dataset.action === 'filter-popup') {
         openFilterPopup(clipTarget, item);
+    } else if (item.dataset.action === 'filter-mode') {
+        toggleFilterMode();
     }
     // ... resto de manejadores del clipMenu existentes ...
 });
@@ -1149,6 +1162,7 @@ document.addEventListener('pointerdown', (e) => {
 const textMenu = createMenu(`
     <div class="context-menu-item" data-action="copy-clip">Copiar</div>
     <div class="context-menu-item" data-action="edit-text">Editar texto...</div>
+    <div class="context-menu-item" data-action="filter-mode">Modo color</div>
     <div class="context-menu-item" data-action="toggle-lock">Bloquear</div>
     <div class="context-menu-item" data-action="trim-mode">Modo recortes</div>
     <div class="context-menu-item" data-action="reset-transform">Restablecer posición y tamaño</div>
@@ -1160,6 +1174,8 @@ function showTextContextMenu(x, y, clip) {
     lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
     textMenu.querySelector('[data-action="trim-mode"]').textContent =
         trimMode ? 'Salir del modo recortes' : 'Modo recortes';
+    textMenu.querySelector('[data-action="filter-mode"]').textContent =
+        filterMode ? 'Salir del modo color' : 'Modo color';
 
     // Con el texto bloqueado solo queda disponible "Desbloquear"
     textMenu.querySelectorAll('.context-menu-item').forEach(item => {
@@ -1175,6 +1191,7 @@ textMenu.addEventListener('click', (e) => {
     const action = item.dataset.action;
     if (action === 'copy-clip') duplicateClipToNewRow(clipTarget);
     else if (action === 'edit-text') openTextPopup(clipTarget);
+    else if (action === 'filter-mode') toggleFilterMode();
     else if (action === 'toggle-lock') setClipLocked(clipTarget, !clipTarget.locked);
     else if (action === 'trim-mode') toggleTrimMode();
     else if (action === 'reset-transform') resetClipTransform(clipTarget);
@@ -1257,9 +1274,15 @@ function buildAdjustmentPanel() {
 buildAdjustmentPanel();
 
 let filterTargetClip = null;
+let filterTargetBatch = null;
 let filterBeforeType = 'none';
 let filterBeforeIntensity = 100;
 let filterBeforeAdjustments = '';
+
+function getFilterTargets() {
+    if (filterTargetBatch && filterTargetBatch.length) return filterTargetBatch;
+    return filterTargetClip ? [filterTargetClip] : [];
+}
 
 function syncAdjustmentControls(clip) {
     const a = getClipAdjustments(clip);
@@ -1274,9 +1297,10 @@ function syncAdjustmentControls(clip) {
     });
 }
 
-function openFilterPopup(clip, anchorEl) {
-    if (clip.locked) return;
+function openFilterPopup(clip, anchorEl, batchClips = null) {
+    if (!clip || clip.locked) return;
     filterTargetClip = clip;
+    filterTargetBatch = Array.isArray(batchClips) && batchClips.length ? batchClips : null;
     filterBeforeType = clip.filterType || 'none';
     filterBeforeIntensity = clip.intensity ?? 100;
     clip.adjustments = getClipAdjustments(clip);
@@ -1298,14 +1322,17 @@ function openFilterPopup(clip, anchorEl) {
 function closeFilterPopup() {
     if (filterPopup.classList.contains('hidden')) return;
     filterPopup.classList.add('hidden');
+    const wasBatch = !!filterTargetBatch;
     if (filterTargetClip) {
-        if ((filterTargetClip.filterType || 'none') !== filterBeforeType ||
+        if (wasBatch ||
+            (filterTargetClip.filterType || 'none') !== filterBeforeType ||
             (filterTargetClip.intensity ?? 100) !== filterBeforeIntensity ||
             JSON.stringify(getClipAdjustments(filterTargetClip)) !== filterBeforeAdjustments) {
             commit();
         }
     }
     filterTargetClip = null;
+    filterTargetBatch = null;
 }
 
 // Clic fuera del cartel para cerrarlo
@@ -1318,22 +1345,28 @@ document.addEventListener('pointerdown', (e) => {
 }, true);
 
 filterTypeSelect.addEventListener('change', () => {
-    if (!filterTargetClip) return;
-    filterTargetClip.filterType = filterTypeSelect.value;
-    updateClipBadge(filterTargetClip);
-    drawClipFilmstrip(filterTargetClip, true);
+    const targets = getFilterTargets();
+    if (!targets.length) return;
+    targets.forEach(c => {
+        c.filterType = filterTypeSelect.value;
+        updateClipBadge(c);
+        drawClipFilmstrip(c, true);
+    });
     requestRender();
 });
 
 filterIntensityInput.addEventListener('input', () => {
-    if (!filterTargetClip) return;
+    const targets = getFilterTargets();
+    if (!targets.length) return;
     let val = parseInt(filterIntensityInput.value.replace(/[^0-9]/g, ''), 10);
     if (isNaN(val)) val = 0;
     val = Math.min(100, Math.max(0, val));
     
-    filterTargetClip.intensity = val;
-    updateClipBadge(filterTargetClip);
-    drawClipFilmstrip(filterTargetClip, true);
+    targets.forEach(c => {
+        c.intensity = val;
+        updateClipBadge(c);
+        drawClipFilmstrip(c, true);
+    });
     requestRender();
 });
 
@@ -1348,25 +1381,31 @@ filterIntensityInput.addEventListener('keydown', (e) => {
 });
 adjustmentPanel.addEventListener('input', (e) => {
     const input = e.target.closest('[data-adjustment]');
-    if (!input || !filterTargetClip) return;
+    const targets = getFilterTargets();
+    if (!input || !targets.length) return;
     const key = input.dataset.adjustment;
     const value = Number(input.value);
-    filterTargetClip.adjustments = getClipAdjustments(filterTargetClip);
-    filterTargetClip.adjustments[key] = value;
     const output = adjustmentPanel.querySelector(`[data-value-for="${key}"]`);
     if (output) output.value = `${value}%`;
-    drawClipFilmstrip(filterTargetClip, true);
+    targets.forEach(c => {
+        c.adjustments = getClipAdjustments(c);
+        c.adjustments[key] = value;
+        drawClipFilmstrip(c, true);
+    });
     requestRender();
 });
 adjustmentPanel.addEventListener('change', (e) => {
     const input = e.target.closest('[data-hsl-color]');
-    if (!input || !filterTargetClip) return;
-    filterTargetClip.adjustments = getClipAdjustments(filterTargetClip);
-    const colors = new Set(filterTargetClip.adjustments.hslColors);
-    if (input.checked) colors.add(input.dataset.hslColor);
-    else colors.delete(input.dataset.hslColor);
-    filterTargetClip.adjustments.hslColors = [...colors];
-    drawClipFilmstrip(filterTargetClip, true);
+    const targets = getFilterTargets();
+    if (!input || !targets.length) return;
+    targets.forEach(c => {
+        c.adjustments = getClipAdjustments(c);
+        const colors = new Set(c.adjustments.hslColors);
+        if (input.checked) colors.add(input.dataset.hslColor);
+        else colors.delete(input.dataset.hslColor);
+        c.adjustments.hslColors = [...colors];
+        drawClipFilmstrip(c, true);
+    });
     requestRender();
 });
 volumePopup.className = 'volume-popup';
@@ -1449,6 +1488,8 @@ function showClipContextMenu(x, y, clip) {
     lockItem.textContent = clip.locked ? 'Desbloquear' : 'Bloquear';
     clipMenu.querySelector('[data-action="trim-mode"]').textContent =
         trimMode ? 'Salir del modo recortes' : 'Modo recortes';
+    clipMenu.querySelector('[data-action="filter-mode"]').textContent =
+        filterMode ? 'Salir del Modo color' : 'Modo color';
 
     // Con el clip bloqueado solo queda disponible "Desbloquear"
     clipMenu.querySelectorAll('.context-menu-item').forEach(item => {
@@ -1953,7 +1994,7 @@ function createClipElement(clip) {
         resize.title = 'Arrastra para alargar o acortar la imagen';
         el.appendChild(resize);
         resize.addEventListener('pointerdown', (e) => {
-            if (e.button !== 0 || clip.locked || el.parentElement?.classList.contains('locked') || trimMode) return;
+            if (e.button !== 0 || clip.locked || el.parentElement?.classList.contains('locked') || trimMode || filterMode) return;
             e.preventDefault(); e.stopPropagation(); hideMenus();
             const startX = e.clientX, startDuration = clip.duration;
             const move = ev => {
@@ -2877,7 +2918,7 @@ function tick(ts) {
 }
 
 function play() {
-    if (!currentProjectId || trimMode) return;
+    if (!currentProjectId || trimMode || filterMode) return;
     const end = contentEnd();
     if (end <= 0 || clock.playing) return;
 
@@ -2901,14 +2942,14 @@ function pause() {
 }
 
 function replay() {
-    if (!currentProjectId || trimMode) return;
+    if (!currentProjectId || trimMode || filterMode) return;
     pause();
     clock.t = 0;
     play();
 }
 
 function seek(t) {
-    if (trimMode) return; // En modo recortes el cabezal no se mueve
+    if (trimMode || filterMode) return; // En modo recortes o filtros el cabezal no se mueve
     clock.t = Math.min(Math.max(0, t), timelineSeconds()); // Entre 0 y el final de la tabla
     if (clock.playing) clock.last = performance.now();
     refreshPreview();
@@ -3034,7 +3075,7 @@ function showSeekTip(ev) {
 }
 
 fsSeek.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || trimMode) return;
+    if (e.button !== 0 || trimMode || filterMode) return;
     e.preventDefault();
     fsSeek.setPointerCapture(e.pointerId);
 
@@ -3566,6 +3607,7 @@ exportBtn.addEventListener('click', async () => {
     }
 
     exitTrimMode();
+    exitFilterMode();
     closeTextPopup();
 
     // 0. Pedir la calidad de imagen antes de exportar (144p, 240p, 480p, 720p, 1080p)
@@ -3956,6 +3998,7 @@ let trimDrag = null; // { x0, y0, lastX, lastY, t0, t1, rows } mientras se arras
 
 function enterTrimMode() {
     if (!currentProjectId || exporting || trimMode) return;
+    exitFilterMode();
     pause();
     hideMenus();
     trimMode = true;
@@ -4329,6 +4372,297 @@ async function applyTrim(t0, t1, rows) {
     }
 }
 
+
+// =====================================================================
+//  Modo color
+//  - Clic derecho → "Modo color". Esc para salir.
+//  - Con el clic izquierdo se arrastra un cuadro sobre la línea de tiempo. Al soltar se
+//    aisla ese tramo [t0, t1] en los clips visuales (video, imagen, texto) que toca el cuadro
+//    (dividiéndolos en sus bordes sin borrar nada) y se abre el panel de Filtros y Ajustes
+//    para aplicarlo únicamente en esa sección marcada.
+// =====================================================================
+const FILTER_HINT = 'MODO COLOR · arrastra un cuadro sobre la línea de tiempo para marcar dónde aplicar el filtro · Esc para salir';
+
+const filterSelection = document.createElement('div');
+filterSelection.className = 'filter-selection';
+const filterSelectionLabel = document.createElement('span');
+filterSelectionLabel.className = 'filter-selection-label';
+filterSelection.appendChild(filterSelectionLabel);
+timelineEl.appendChild(filterSelection);
+
+const filterBanner = document.createElement('div');
+filterBanner.className = 'filter-banner hidden';
+document.body.appendChild(filterBanner);
+
+let filterDrag = null;
+
+function enterFilterMode() {
+    if (!currentProjectId || exporting || filterMode) return;
+    exitTrimMode();
+    pause();
+    hideMenus();
+    filterMode = true;
+    document.body.classList.add('filter-mode');
+    filterBanner.textContent = FILTER_HINT;
+    filterBanner.classList.remove('hidden');
+}
+
+function exitFilterMode() {
+    if (!filterMode) return;
+    endFilterDrag();
+    filterMode = false;
+    document.body.classList.remove('filter-mode');
+    filterBanner.classList.add('hidden');
+}
+
+function toggleFilterMode() {
+    if (filterMode) exitFilterMode(); else enterFilterMode();
+}
+
+function updateFilterSelection() {
+    const d = filterDrag;
+    if (!d) return;
+
+    const tl = timelineEl.getBoundingClientRect();
+    const cx = d.lastX - tl.left;
+    const cy = d.lastY - tl.top;
+    const maxT = timelineSeconds();
+    const toTime = (x) => snapTime(Math.min(maxT, Math.max(0, (x - 1) / PX_PER_SEC)));
+
+    const a = toTime(Math.min(d.x0, cx));
+    const b = toTime(Math.max(d.x0, cx));
+    const rows = trimRowsBetween(d.y0, cy, tl.top);
+    d.t0 = a;
+    d.t1 = b;
+    d.rows = rows;
+
+    if (!rows.length) {
+        filterSelection.style.display = 'none';
+        return;
+    }
+
+    const top = rows[0].getBoundingClientRect().top - tl.top;
+    const bottom = rows[rows.length - 1].getBoundingClientRect().bottom - tl.top;
+    filterSelection.style.display = 'block';
+    filterSelection.style.left = `${a * PX_PER_SEC + 1}px`;
+    filterSelection.style.width = `${Math.max(0, (b - a) * PX_PER_SEC)}px`;
+    filterSelection.style.top = `${top}px`;
+    filterSelection.style.height = `${bottom - top}px`;
+    filterSelectionLabel.textContent = `Filtro · ${(b - a).toFixed(1)} s`;
+}
+
+function onFilterMove(ev) {
+    if (!filterDrag) return;
+    filterDrag.lastX = ev.clientX;
+    filterDrag.lastY = ev.clientY;
+    updateFilterSelection();
+}
+
+function onFilterScroll() {
+    updateFilterSelection();
+}
+
+function onFilterUp(ev) {
+    const d = filterDrag;
+    if (!d) return;
+    d.lastX = ev.clientX;
+    d.lastY = ev.clientY;
+    updateFilterSelection();
+
+    const { t0, t1, rows } = d;
+    endFilterDrag();
+    if (t1 - t0 >= MIN_TRIM && rows.length) applyFilterRegion(t0, t1, rows);
+}
+
+function endFilterDrag() {
+    window.removeEventListener('pointermove', onFilterMove);
+    window.removeEventListener('pointerup', onFilterUp);
+    window.removeEventListener('pointercancel', endFilterDrag);
+    window.removeEventListener('scroll', onFilterScroll, true);
+    filterDrag = null;
+    filterSelection.style.display = 'none';
+}
+
+timelineEl.addEventListener('pointerdown', (e) => {
+    if (!filterMode || trimBusy || exporting || !currentProjectId || e.button !== 0) return;
+
+    const tl = timelineEl.getBoundingClientRect();
+    const y0 = e.clientY - tl.top;
+    if (!trimRowsBetween(y0, y0, tl.top).length) return;
+
+    e.preventDefault();
+    hideMenus();
+    endFilterDrag();
+    filterDrag = { x0: e.clientX - tl.left, y0, lastX: e.clientX, lastY: e.clientY, t0: 0, t1: 0, rows: [] };
+
+    window.addEventListener('pointermove', onFilterMove);
+    window.addEventListener('pointerup', onFilterUp);
+    window.addEventListener('pointercancel', endFilterDrag);
+    window.addEventListener('scroll', onFilterScroll, true);
+    updateFilterSelection();
+});
+
+// Calcula cómo dividir un clip visual para aislar exactamente la intersección con [t0, t1]
+function planRowFilterSplit(row, t0, t1) {
+    const plan = [];
+    for (const el of Array.from(row.children)) {
+        const clip = el._clip;
+        if (!clip || clip.type === 'audio') continue;
+
+        const s = clip.start;
+        const e = clip.start + clip.duration;
+        if (e <= t0 + EPS || s >= t1 - EPS) continue; // No se solapa con la selección
+
+        const cutA = Math.max(s, t0);
+        const cutB = Math.min(e, t1);
+        if (cutB - cutA < MIN_TRIM - EPS) continue;
+
+        const hasLeft = cutA > s + EPS;
+        const hasRight = cutB < e - EPS;
+
+        const segments = [];
+        if (hasLeft) {
+            segments.push({
+                role: 'left',
+                part: { start: s, srcStart: clip.srcStart, duration: cutA - s }
+            });
+        }
+        segments.push({
+            role: 'target',
+            part: { start: cutA, srcStart: clip.srcStart + (cutA - s), duration: cutB - cutA }
+        });
+        if (hasRight) {
+            segments.push({
+                role: 'right',
+                part: { start: cutB, srcStart: clip.srcStart + (cutB - s), duration: e - cutB }
+            });
+        }
+
+        plan.push({ clip, segments });
+    }
+    return plan;
+}
+
+async function applyFilterRegion(t0, t1, rows) {
+    if (trimBusy || !currentProjectId) return;
+
+    const projectId = currentProjectId;
+    const project = currentProject();
+
+    const plans = [];
+    for (const row of rows) {
+        if (row.classList.contains('locked')) continue;
+        const plan = planRowFilterSplit(row, t0, t1);
+        if (!plan.length) continue;
+        if (plan.some(p => p.clip.locked)) continue;
+        plans.push({ row, plan });
+    }
+    if (!plans.length) return;
+
+    trimBusy = true;
+    renderFrozen = true;
+    filterBanner.textContent = 'Preparando zona de filtro… un momento';
+
+    const created = [];
+    const targetClips = [];
+    let applied = false;
+
+    try {
+        // 1) Abrir nuevos <video> para los sub-segmentos adicionales (cuando se divide un clip)
+        for (const { plan } of plans) {
+            for (const item of plan) {
+                const hasMedia = item.clip.type !== 'image' && item.clip.type !== 'text';
+                for (let idx = 0; idx < item.segments.length; idx++) {
+                    const seg = item.segments[idx];
+                    if (idx === 0) {
+                        seg.clipObj = item.clip;
+                    } else {
+                        const video = hasMedia ? await openClipVideo(item.clip.url, false) : null;
+                        if (hasMedia && !video) throw new Error('No se pudo abrir el video para la región de filtro');
+                        const frag = createFragmentClip(item.clip, video);
+                        seg.clipObj = frag;
+                        created.push(frag);
+                    }
+                    if (seg.role === 'target') {
+                        targetClips.push(seg.clipObj);
+                    }
+                }
+            }
+        }
+        if (projectId !== currentProjectId) throw new Error('cancelado');
+
+        // 2) Preparar los fotogramas de los videos en la posición del cabezal
+        const at = clock.t;
+        const jobs = [];
+        for (const { plan } of plans) {
+            for (const item of plan) {
+                for (let idx = 0; idx < item.segments.length; idx++) {
+                    const seg = item.segments[idx];
+                    const clip = seg.clipObj;
+                    const part = seg.part;
+                    const v = clip.video;
+                    if (!v) continue;
+
+                    const local = at - part.start;
+                    if (local >= 0 && local < part.duration) {
+                        jobs.push(prepareVideoAt(v, part.srcStart + local));
+                    } else if (idx > 0) {
+                        jobs.push(prepareVideoAt(v, part.srcStart));
+                    } else if (local < 0 && Math.abs(v.currentTime - part.srcStart) > 0.05) {
+                        v.currentTime = part.srcStart;
+                    }
+                }
+            }
+        }
+        await Promise.all(jobs);
+        if (projectId !== currentProjectId) throw new Error('cancelado');
+
+        // 3) Insertar en la línea de tiempo manteniendo el orden consecutivo exacto
+        for (const { row, plan } of plans) {
+            for (const item of plan) {
+                let anchorEl = item.clip.el;
+                for (let idx = 0; idx < item.segments.length; idx++) {
+                    const seg = item.segments[idx];
+                    const clip = seg.clipObj;
+                    setClipSpan(clip, seg.part);
+                    if (idx === 0) {
+                        layoutClip(clip);
+                    } else {
+                        project.clips[clip.id] = clip;
+                        placeClip(row, clip);
+                        row.insertBefore(clip.el, anchorEl.nextSibling);
+                        anchorEl = clip.el;
+                    }
+                }
+            }
+        }
+        applied = true;
+
+        if (audioCtx) ensureAudioGraph();
+        commit();
+    } catch (err) {
+        if (!applied) created.forEach(discardFragment);
+        if (err.message !== 'cancelado') {
+            console.error(err);
+            alert('No se pudo marcar el área de filtro. No se modificó nada.');
+        }
+    } finally {
+        renderFrozen = false;
+        trimBusy = false;
+        if (filterMode) filterBanner.textContent = FILTER_HINT;
+        if (currentProjectId) refreshPreview();
+    }
+
+    // 4) Salir del Modo color y abrir el cartel de Filtros y Ajustes sobre la región marcada
+    if (applied && targetClips.length) {
+        exitFilterMode();
+        const primary = targetClips[0];
+        if (primary && primary.el && primary.el.isConnected) {
+            openFilterPopup(primary, primary.el, targetClips);
+        }
+    }
+}
+
 // =====================================================================
 //  Mover, escalar y girar capas en PANTALLA COMPLETA
 //  - Fila → clic derecho → "Habilitar desplazamiento": las imágenes y videos de esa fila se pueden transformar.
@@ -4420,7 +4754,7 @@ function clipGeometry(clip) {
 // Coloca (o esconde) la caja de selección sobre la capa elegida
 function updateTransformOverlay() {
     const clip = selectedClip;
-    const visible = videoPlayerContainer.classList.contains('is-fullscreen') && !exporting && !trimMode &&
+    const visible = videoPlayerContainer.classList.contains('is-fullscreen') && !exporting && !trimMode && !filterMode &&
         clip && isClipEditable(clip) && isClipActive(clip);
     const g = visible ? clipGeometry(clip) : null;
     if (!g) { tfBox.style.display = 'none'; return; }
@@ -4557,7 +4891,7 @@ function onTfUp() {
 }
 
 tfLayer.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || exporting || trimMode || trimBusy || !currentProjectId || tfDrag) return;
+    if (e.button !== 0 || exporting || trimMode || filterMode || trimBusy || !currentProjectId || tfDrag) return;
     e.preventDefault();
 
     const m = previewMetrics();
@@ -4604,7 +4938,7 @@ tfLayer.addEventListener('pointerdown', (e) => {
 
 // Doble clic sobre la capa seleccionada: vuelve a su posición y tamaño originales
 tfLayer.addEventListener('dblclick', (e) => {
-    if (exporting || trimMode || !isClipEditable(selectedClip)) return;
+    if (exporting || trimMode || filterMode || !isClipEditable(selectedClip)) return;
     if (e.target.closest('.tf-handle, .tf-rotate')) return;
     resetClipTransform(selectedClip);
 });
