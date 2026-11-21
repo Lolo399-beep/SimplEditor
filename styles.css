@@ -1687,3 +1687,140 @@ body.filter-mode .row-handle {
 body.filter-mode .ruler {
     cursor: not-allowed;
 }
+
+/* --- Panel de Configuración de Audio (estilo Color) & Zona de Audio --- */
+.audio-popup {
+    position: fixed;
+    z-index: 1002;
+    background-color: #000000;
+    border: 1px solid #ffffff;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.9);
+    padding: 14px;
+    width: 345px;
+    max-height: min(82vh, 760px);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    color: #ffffff;
+}
+
+.audio-popup::-webkit-scrollbar { width: 7px; }
+.audio-popup::-webkit-scrollbar-thumb { background: #555; border-radius: 8px; }
+
+.audio-popup-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.audio-popup-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.audio-mini-btn {
+    background: transparent;
+    color: #ffffff;
+    border: 1px solid #888888;
+    padding: 4px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.audio-mini-btn:hover {
+    background: #ffffff;
+    color: #000000;
+    border-color: #ffffff;
+}
+
+.audio-mini-btn:disabled {
+    opacity: 0.35;
+    pointer-events: none;
+}
+
+.audio-checkbox-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: #dddddd;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.audio-checkbox-row input[type="checkbox"] {
+    accent-color: #02f7c2;
+    cursor: pointer;
+}
+
+.audio-popup .adjustment-heading {
+    color: #02f7c2;
+}
+
+.audio-popup .adjustment-slider {
+    accent-color: #02f7c2;
+}
+
+/* Modo Zona de Audio (análogo a Modo color) */
+.audio-zone-selection {
+    position: absolute;
+    display: none;
+    background-color: rgba(2, 247, 194, 0.22);
+    border: 1px dashed #02f7c2;
+    pointer-events: none;
+    z-index: 35;
+}
+
+.audio-zone-selection-label {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    padding: 0 5px;
+    font-size: 11px;
+    line-height: 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background-color: #02f7c2;
+    color: #000000;
+    white-space: nowrap;
+}
+
+.audio-zone-banner {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    padding: 10px 18px;
+    background-color: #000000;
+    border: 1px solid #02f7c2;
+    color: #ffffff;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 900;
+}
+
+body.audio-zone-mode .rows-container,
+body.audio-zone-mode .row-item {
+    cursor: crosshair;
+}
+
+body.audio-zone-mode .clip {
+    pointer-events: none;
+    cursor: crosshair;
+}
+
+body.audio-zone-mode .row-grip,
+body.audio-zone-mode .row-handle {
+    pointer-events: none;
+}
+
+body.audio-zone-mode .ruler {
+    cursor: not-allowed;
+}

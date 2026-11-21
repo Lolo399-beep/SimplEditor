@@ -5868,3 +5868,1262 @@ function duplicateClipToNewRow(clip) {
     commit();
     refreshPreview();
 }
+
+// =====================================================================
+//  CONFIGURACIÓN AVANZADA DE AUDIO (Menú estilo Color, DSP Web Audio,
+//  Fundidos, Velocidad/Tono individual, Zona de audio, Copiar/Pegar y
+//  Medidor visual en el oscilograma)
+// =====================================================================
+let audioZoneMode = false;
+let copiedAudioSettings = null;
+
+const AUDIO_FX_DEFAULTS = Object.freeze({
+    preset: 'none',
+    fadeIn: 0,
+    fadeOut: 0,
+    fadeCurve: 'smooth',        // 'linear' | 'smooth' | 'sharp'
+    crossfade: 0,               // segundos de fundido cruzado con clips adyacentes en la misma fila
+    gain: 100,                  // 0% a 200% (+6 dB; se combina con boostDb hasta +12 dB)
+    boostDb: 0,                 // 0 a +12 dB extra
+    normalizeTarget: 0,         // 0 = apagado, >0 = pico objetivo % (ej. 95%)
+    compressorOn: false,
+    compThreshold: -18,         // dB (-60..0)
+    compRatio: 4,               // 1..20
+    limiterOn: true,
+    noiseGateThreshold: -60,    // -60 dB = apagado; hasta -10 dB
+    eqLow: 0,                   // -18 a +18 dB (200 Hz)
+    eqMid: 0,                   // -18 a +18 dB (1200 Hz)
+    eqHigh: 0,                  // -18 a +18 dB (4500 Hz)
+    highPassFreq: 20,           // 20 Hz = apagado; hasta 1000 Hz
+    lowPassFreq: 20000,         // 20000 Hz = apagado; hasta 800 Hz
+    reverbMix: 0,               // 0..100%
+    reverbSize: 'room',         // 'room' | 'hall' | 'plate'
+    delayTime: 0.25,            // 0.05..1.0 s
+    delayFeedback: 35,          // 0..85%
+    delayMix: 0,                // 0..100%
+    pan: 0,                     // -100 (Izq) a +100 (Der)
+    clipSpeed: 1,               // 0.25 a 4.0 individual del clip
+    pitchSemitones: 0,          // -12 a +12 semitonos
+    pitchLinked: false,         // true = afinación ligada a la velocidad (preservesPitch = false)
+    showEnvelope: true          // Medidor visual en el oscilograma
+});
+
+const AUDIO_PRESET_MAP = {
+    none: {},
+    clear_voice: {
+        highPassFreq: 95,
+        lowPassFreq: 16000,
+        eqLow: -3,
+        eqMid: 4,
+        eqHigh: 5,
+        compressorOn: true,
+        compThreshold: -20,
+        compRatio: 4,
+        limiterOn: true,
+        noiseGateThreshold: -45
+    },
+    radio_phone: {
+        highPassFreq: 380,
+        lowPassFreq: 3200,
+        eqLow: -12,
+        eqMid: 8,
+        eqHigh: -10,
+        compressorOn: true,
+        compThreshold: -24,
+        compRatio: 8,
+        limiterOn: true
+    },
+    cinema_bass: {
+        highPassFreq: 25,
+        lowPassFreq: 18000,
+        eqLow: 9,
+        eqMid: -2,
+        eqHigh: 2,
+        compressorOn: true,
+        compThreshold: -16,
+        compRatio: 3,
+        reverbMix: 18,
+        reverbSize: 'hall'
+    },
+    distant_ambient: {
+        highPassFreq: 160,
+        lowPassFreq: 5500,
+        eqLow: -4,
+        eqMid: -2,
+        eqHigh: -7,
+        reverbMix: 55,
+        reverbSize: 'hall',
+        delayTime: 0.32,
+        delayFeedback: 30,
+        delayMix: 22
+    },
+    submarine_muffled: {
+        highPassFreq: 30,
+        lowPassFreq: 950,
+        eqLow: 7,
+        eqMid: -6,
+        eqHigh: -16,
+        reverbMix: 42,
+        reverbSize: 'plate',
+        delayTime: 0.18,
+        delayFeedback: 40,
+        delayMix: 20
+    }
+};
+
+function getClipAudioFx(clip) {
+    const raw = (clip && clip.audioFx) ? clip.audioFx : {};
+    const baseGain = clip && clip.volume != null ? Math.round(clip.volume * 100) : 100;
+    return {
+        ...AUDIO_FX_DEFAULTS,
+        gain: baseGain,
+        ...raw
+    };
+}
+
+function cloneAudioFx(fx) {
+    return { ...AUDIO_FX_DEFAULTS, ...(fx || {}) };
+}
+
+function hasCustomAudioFx(clip) {
+    if (!clip || !clip.audioFx) return false;
+    const fx = getClipAudioFx(clip);
+    return (
+        fx.preset !== 'none' ||
+        fx.fadeIn > 0 ||
+        fx.fadeOut > 0 ||
+        fx.crossfade > 0 ||
+        fx.gain !== 100 ||
+        fx.boostDb > 0 ||
+        fx.normalizeTarget > 0 ||
+        fx.compressorOn ||
+        fx.noiseGateThreshold > -60 ||
+        fx.eqLow !== 0 ||
+        fx.eqMid !== 0 ||
+        fx.eqHigh !== 0 ||
+        fx.highPassFreq > 20 ||
+        fx.lowPassFreq < 20000 ||
+        fx.reverbMix > 0 ||
+        fx.delayMix > 0 ||
+        fx.pan !== 0 ||
+        fx.clipSpeed !== 1 ||
+        fx.pitchSemitones !== 0
+    );
+}
+
+// --- 1. Integración en el menú contextual de audio (clic derecho -> Configurar) ---
+(function patchAudioContextMenu() {
+    if (!audioMenu) return;
+    const firstItem = audioMenu.firstElementChild;
+    const configItem = document.createElement('div');
+    configItem.className = 'context-menu-item';
+    configItem.dataset.action = 'configure-audio';
+    configItem.textContent = 'Configurar';
+
+    const zoneItem = document.createElement('div');
+    zoneItem.className = 'context-menu-item';
+    zoneItem.dataset.action = 'audio-zone-mode';
+    zoneItem.textContent = 'Zona de audio';
+
+    const copyItem = document.createElement('div');
+    copyItem.className = 'context-menu-item';
+    copyItem.dataset.action = 'copy-audio-fx';
+    copyItem.textContent = 'Copiar ajustes de audio';
+
+    const pasteItem = document.createElement('div');
+    pasteItem.className = 'context-menu-item';
+    pasteItem.dataset.action = 'paste-audio-fx';
+    pasteItem.textContent = 'Pegar ajustes de audio';
+
+    const sep = document.createElement('div');
+    sep.className = 'context-menu-separator';
+
+    if (firstItem) {
+        audioMenu.insertBefore(configItem, firstItem);
+        audioMenu.insertBefore(zoneItem, firstItem);
+        audioMenu.insertBefore(copyItem, firstItem);
+        audioMenu.insertBefore(pasteItem, firstItem);
+        audioMenu.insertBefore(sep, firstItem);
+    } else {
+        audioMenu.append(configItem, zoneItem, copyItem, pasteItem, sep);
+    }
+
+    audioMenu.addEventListener('click', (e) => {
+        const item = e.target.closest('.context-menu-item');
+        if (!item || !clipTarget || item.classList.contains('disabled')) return;
+        const action = item.dataset.action;
+        if (action === 'configure-audio') {
+            openAudioConfigPopup(clipTarget, item);
+        } else if (action === 'audio-zone-mode') {
+            toggleAudioZoneMode();
+        } else if (action === 'copy-audio-fx') {
+            copyAudioSettingsFromClip(clipTarget);
+        } else if (action === 'paste-audio-fx') {
+            pasteAudioSettingsToClip(clipTarget);
+        }
+    });
+})();
+
+const _origShowAudioContextMenu = showAudioContextMenu;
+showAudioContextMenu = function(x, y, clip) {
+    _origShowAudioContextMenu(x, y, clip);
+    const zoneOpt = audioMenu.querySelector('[data-action="audio-zone-mode"]');
+    if (zoneOpt) zoneOpt.textContent = audioZoneMode ? 'Salir de Zona de audio' : 'Zona de audio';
+    const pasteOpt = audioMenu.querySelector('[data-action="paste-audio-fx"]');
+    if (pasteOpt) {
+        pasteOpt.classList.toggle('disabled', !!clip.locked || !copiedAudioSettings);
+    }
+};
+
+function copyAudioSettingsFromClip(clip) {
+    if (!clip) return;
+    copiedAudioSettings = cloneAudioFx(getClipAudioFx(clip));
+}
+
+function pasteAudioSettingsToClip(clip) {
+    if (!clip || clip.locked || !copiedAudioSettings) return;
+    clip.audioFx = cloneAudioFx(copiedAudioSettings);
+    clip.volume = Math.min(2, Math.max(0, clip.audioFx.gain / 100));
+    if (clip.baseDuration && clip.audioFx.clipSpeed) {
+        clip.duration = Math.max(0.1, clip.baseDuration / clip.audioFx.clipSpeed);
+        layoutClip(clip);
+        fitTimeline();
+    }
+    applyAudioDspParams(clip);
+    updateClipBadge(clip);
+    drawClipFilmstrip(clip, true);
+    commit();
+    syncClips();
+}
+
+// --- 2. Panel flotante "Configurar" (idéntico en diseño al panel de Color) ---
+const audioConfigPopup = document.createElement('div');
+audioConfigPopup.className = 'audio-popup hidden';
+audioConfigPopup.innerHTML = `
+    <div class="audio-popup-header">
+        <div class="filter-section-title" style="margin:0;">Preajustes rápidos de audio</div>
+        <div class="audio-popup-actions">
+            <button type="button" id="audioCopyFxBtn" class="audio-mini-btn" title="Copiar ajustes de este clip">Copiar</button>
+            <button type="button" id="audioPasteFxBtn" class="audio-mini-btn" title="Pegar ajustes copiados">Pegar</button>
+            <button type="button" id="audioResetFxBtn" class="audio-mini-btn" title="Restablecer valores por defecto">Reset</button>
+        </div>
+    </div>
+    <select class="filter-select" id="audioPresetSelect">
+        <option value="none">Sin preajuste (Personalizado)</option>
+        <option value="clear_voice">Voz clara</option>
+        <option value="radio_phone">Radio / Teléfono</option>
+        <option value="cinema_bass">Cine / Grave</option>
+        <option value="distant_ambient">Ambiente lejano</option>
+        <option value="submarine_muffled">Submarino / Amortiguado</option>
+    </select>
+
+    <div class="adjustment-divider"></div>
+
+    <div class="adjustment-panel" id="audioConfigControls">
+        <!-- Fundidos y Transiciones -->
+        <section class="adjustment-group">
+            <div class="adjustment-heading">Fundidos y Crossfade</div>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Fade in (entrada)</span>
+                <input class="adjustment-slider" data-afx="fadeIn" type="range" min="0" max="10" step="0.1" value="0">
+                <output class="adjustment-value" data-afx-val="fadeIn">0.0 s</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Fade out (salida)</span>
+                <input class="adjustment-slider" data-afx="fadeOut" type="range" min="0" max="10" step="0.1" value="0">
+                <output class="adjustment-value" data-afx-val="fadeOut">0.0 s</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Fundido cruzado</span>
+                <input class="adjustment-slider" data-afx="crossfade" type="range" min="0" max="5" step="0.1" value="0">
+                <output class="adjustment-value" data-afx-val="crossfade">0.0 s</output>
+            </label>
+            <div class="adjustment-row" style="grid-template-columns: 104px 1fr;">
+                <span class="adjustment-name">Curva del fundido</span>
+                <select class="filter-select" id="audioFadeCurveSelect">
+                    <option value="linear">Lineal</option>
+                    <option value="smooth">Suave (Curva S)</option>
+                    <option value="sharp">Marcada (Exponencial)</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- Volumen, Ganancia, Normalización y Dinámica -->
+        <section class="adjustment-group">
+            <div class="adjustment-heading">Ganancia y Dinámica</div>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Ganancia / Boost</span>
+                <input class="adjustment-slider" data-afx="gain" type="range" min="0" max="200" step="1" value="100">
+                <output class="adjustment-value" data-afx-val="gain">100%</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Boost extra (+dB)</span>
+                <input class="adjustment-slider" data-afx="boostDb" type="range" min="0" max="12" step="0.5" value="0">
+                <output class="adjustment-value" data-afx-val="boostDb">+0.0 dB</output>
+            </label>
+            <div class="adjustment-row" style="grid-template-columns: 104px 1fr;">
+                <span class="adjustment-name">Normalización</span>
+                <button type="button" id="audioNormalizeBtn" class="audio-mini-btn">Auto-nivelar pico (95%)</button>
+            </div>
+            <label class="audio-checkbox-row">
+                <span>Compresor (nivelar picos/suaves)</span>
+                <input type="checkbox" id="audioCompCheck">
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Umbral compresor</span>
+                <input class="adjustment-slider" data-afx="compThreshold" type="range" min="-50" max="0" step="1" value="-18">
+                <output class="adjustment-value" data-afx-val="compThreshold">-18 dB</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Ratio compresor</span>
+                <input class="adjustment-slider" data-afx="compRatio" type="range" min="1" max="20" step="0.5" value="4">
+                <output class="adjustment-value" data-afx-val="compRatio">4.0:1</output>
+            </label>
+            <label class="audio-checkbox-row">
+                <span>Limitador de techo (anti-saturación)</span>
+                <input type="checkbox" id="audioLimiterCheck" checked>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Puerta de ruido</span>
+                <input class="adjustment-slider" data-afx="noiseGateThreshold" type="range" min="-60" max="-10" step="1" value="-60">
+                <output class="adjustment-value" data-afx-val="noiseGateThreshold">Off</output>
+            </label>
+        </section>
+
+        <!-- Ecualizador de 3 bandas y Filtros de corte -->
+        <section class="adjustment-group">
+            <div class="adjustment-heading">Ecualizador y Filtros de Corte</div>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Graves (Low)</span>
+                <input class="adjustment-slider" data-afx="eqLow" type="range" min="-18" max="18" step="0.5" value="0">
+                <output class="adjustment-value" data-afx-val="eqLow">0 dB</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Medios (Mid)</span>
+                <input class="adjustment-slider" data-afx="eqMid" type="range" min="-18" max="18" step="0.5" value="0">
+                <output class="adjustment-value" data-afx-val="eqMid">0 dB</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Agudos (High)</span>
+                <input class="adjustment-slider" data-afx="eqHigh" type="range" min="-18" max="18" step="0.5" value="0">
+                <output class="adjustment-value" data-afx-val="eqHigh">0 dB</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Paso alto (HPF)</span>
+                <input class="adjustment-slider" data-afx="highPassFreq" type="range" min="20" max="1000" step="5" value="20">
+                <output class="adjustment-value" data-afx-val="highPassFreq">Off</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Paso bajo (LPF)</span>
+                <input class="adjustment-slider" data-afx="lowPassFreq" type="range" min="800" max="20000" step="100" value="20000">
+                <output class="adjustment-value" data-afx-val="lowPassFreq">Off</output>
+            </label>
+        </section>
+
+        <!-- Espacio, Reverb, Eco / Delay y Panorama -->
+        <section class="adjustment-group">
+            <div class="adjustment-heading">Espacio, Reverb, Eco y Panorama</div>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Reverberación</span>
+                <input class="adjustment-slider" data-afx="reverbMix" type="range" min="0" max="100" step="1" value="0">
+                <output class="adjustment-value" data-afx-val="reverbMix">0%</output>
+            </label>
+            <div class="adjustment-row" style="grid-template-columns: 104px 1fr;">
+                <span class="adjustment-name">Tipo de sala</span>
+                <select class="filter-select" id="audioReverbSizeSelect">
+                    <option value="room">Habitación pequeña</option>
+                    <option value="hall">Sala grande / Auditorio</option>
+                    <option value="plate">Eco suave (Plate)</option>
+                </select>
+            </div>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Eco / Delay (Mix)</span>
+                <input class="adjustment-slider" data-afx="delayMix" type="range" min="0" max="100" step="1" value="0">
+                <output class="adjustment-value" data-afx-val="delayMix">0%</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Tiempo de eco</span>
+                <input class="adjustment-slider" data-afx="delayTime" type="range" min="0.05" max="1.0" step="0.05" value="0.25">
+                <output class="adjustment-value" data-afx-val="delayTime">0.25 s</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Repeticiones</span>
+                <input class="adjustment-slider" data-afx="delayFeedback" type="range" min="0" max="85" step="1" value="35">
+                <output class="adjustment-value" data-afx-val="delayFeedback">35%</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Panorama (L / R)</span>
+                <input class="adjustment-slider" data-afx="pan" type="range" min="-100" max="100" step="1" value="0">
+                <output class="adjustment-value" data-afx-val="pan">Centro</output>
+            </label>
+        </section>
+
+        <!-- Velocidad individual, Tono / Pitch y Medidor visual -->
+        <section class="adjustment-group">
+            <div class="adjustment-heading">Velocidad, Tono y Oscilograma</div>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Velocidad del clip</span>
+                <input class="adjustment-slider" data-afx="clipSpeed" type="range" min="0.25" max="3.0" step="0.05" value="1">
+                <output class="adjustment-value" data-afx-val="clipSpeed">x1.00</output>
+            </label>
+            <label class="adjustment-row">
+                <span class="adjustment-name">Tono / Pitch</span>
+                <input class="adjustment-slider" data-afx="pitchSemitones" type="range" min="-12" max="12" step="1" value="0">
+                <output class="adjustment-value" data-afx-val="pitchSemitones">0 st</output>
+            </label>
+            <label class="audio-checkbox-row">
+                <span>Ligar afinación a velocidad (efecto cinta)</span>
+                <input type="checkbox" id="audioPitchLinkedCheck">
+            </label>
+            <label class="audio-checkbox-row">
+                <span>Medidor visual de ganancia/fundidos en onda</span>
+                <input type="checkbox" id="audioEnvelopeCheck" checked>
+            </label>
+        </section>
+    </div>
+`;
+document.body.appendChild(audioConfigPopup);
+
+const audioPresetSelect = document.getElementById('audioPresetSelect');
+const audioFadeCurveSelect = document.getElementById('audioFadeCurveSelect');
+const audioReverbSizeSelect = document.getElementById('audioReverbSizeSelect');
+const audioCompCheck = document.getElementById('audioCompCheck');
+const audioLimiterCheck = document.getElementById('audioLimiterCheck');
+const audioPitchLinkedCheck = document.getElementById('audioPitchLinkedCheck');
+const audioEnvelopeCheck = document.getElementById('audioEnvelopeCheck');
+const audioNormalizeBtn = document.getElementById('audioNormalizeBtn');
+const audioCopyFxBtn = document.getElementById('audioCopyFxBtn');
+const audioPasteFxBtn = document.getElementById('audioPasteFxBtn');
+const audioResetFxBtn = document.getElementById('audioResetFxBtn');
+
+let audioConfigTarget = null;
+let audioConfigBatch = null;
+let audioConfigBefore = '';
+
+function getAudioConfigTargets() {
+    if (audioConfigBatch && audioConfigBatch.length) return audioConfigBatch;
+    return audioConfigTarget ? [audioConfigTarget] : [];
+}
+
+function formatAfxValue(key, val) {
+    if (key === 'fadeIn' || key === 'fadeOut' || key === 'crossfade' || key === 'delayTime') return `${Number(val).toFixed(2)} s`;
+    if (key === 'gain' || key === 'reverbMix' || key === 'delayMix' || key === 'delayFeedback') return `${Math.round(val)}%`;
+    if (key === 'boostDb') return `+${Number(val).toFixed(1)} dB`;
+    if (key === 'compThreshold') return `${Math.round(val)} dB`;
+    if (key === 'compRatio') return `${Number(val).toFixed(1)}:1`;
+    if (key === 'noiseGateThreshold') return Number(val) <= -60 ? 'Off' : `${Math.round(val)} dB`;
+    if (key === 'eqLow' || key === 'eqMid' || key === 'eqHigh') return `${val > 0 ? '+' : ''}${Number(val).toFixed(1)} dB`;
+    if (key === 'highPassFreq') return Number(val) <= 20 ? 'Off' : `${Math.round(val)} Hz`;
+    if (key === 'lowPassFreq') return Number(val) >= 20000 ? 'Off' : `${Math.round(val)} Hz`;
+    if (key === 'pan') {
+        const n = Math.round(val);
+        if (n === 0) return 'Centro';
+        return n < 0 ? `L ${Math.abs(n)}%` : `R ${n}%`;
+    }
+    if (key === 'clipSpeed') return `x${Number(val).toFixed(2)}`;
+    if (key === 'pitchSemitones') return `${val > 0 ? '+' : ''}${Math.round(val)} st`;
+    return String(val);
+}
+
+function syncAudioConfigControls(clip) {
+    const fx = getClipAudioFx(clip);
+    audioPresetSelect.value = fx.preset || 'none';
+    audioFadeCurveSelect.value = fx.fadeCurve || 'smooth';
+    audioReverbSizeSelect.value = fx.reverbSize || 'room';
+    audioCompCheck.checked = !!fx.compressorOn;
+    audioLimiterCheck.checked = fx.limiterOn !== false;
+    audioPitchLinkedCheck.checked = !!fx.pitchLinked;
+    audioEnvelopeCheck.checked = fx.showEnvelope !== false;
+    audioPasteFxBtn.disabled = !copiedAudioSettings;
+
+    audioConfigPopup.querySelectorAll('[data-afx]').forEach(input => {
+        const key = input.dataset.afx;
+        const val = fx[key] ?? AUDIO_FX_DEFAULTS[key];
+        input.value = val;
+        const out = audioConfigPopup.querySelector(`[data-afx-val="${key}"]`);
+        if (out) out.textContent = formatAfxValue(key, val);
+    });
+}
+
+function openAudioConfigPopup(clip, anchorEl, batchClips = null) {
+    if (!clip || clip.locked) return;
+    ensureAudioGraph();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
+    audioConfigTarget = clip;
+    audioConfigBatch = Array.isArray(batchClips) && batchClips.length ? batchClips : null;
+    clip.audioFx = getClipAudioFx(clip);
+    if (!clip.baseDuration) clip.baseDuration = clip.duration * (clip.audioFx.clipSpeed || 1);
+    audioConfigBefore = JSON.stringify(clip.audioFx);
+
+    syncAudioConfigControls(clip);
+
+    const r = anchorEl.getBoundingClientRect();
+    audioConfigPopup.classList.remove('hidden');
+    const w = audioConfigPopup.offsetWidth;
+    const h = audioConfigPopup.offsetHeight;
+    audioConfigPopup.style.left = `${Math.max(8, Math.min(r.right + 10, window.innerWidth - w - 8))}px`;
+    audioConfigPopup.style.top = `${Math.max(8, Math.min(r.top, window.innerHeight - h - 8))}px`;
+}
+
+function closeAudioConfigPopup() {
+    if (audioConfigPopup.classList.contains('hidden')) return;
+    audioConfigPopup.classList.add('hidden');
+    const wasBatch = !!audioConfigBatch;
+    if (audioConfigTarget) {
+        if (wasBatch || JSON.stringify(getClipAudioFx(audioConfigTarget)) !== audioConfigBefore) {
+            commit();
+        }
+    }
+    audioConfigTarget = null;
+    audioConfigBatch = null;
+}
+
+document.addEventListener('pointerdown', (e) => {
+    if (!audioConfigPopup.classList.contains('hidden') &&
+        !audioConfigPopup.contains(e.target) &&
+        !e.target.closest('.context-menu')) {
+        closeAudioConfigPopup();
+    }
+}, true);
+
+audioConfigPopup.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); closeAudioConfigPopup(); }
+});
+
+function updateTargetsAudioFx(mutator) {
+    const targets = getAudioConfigTargets();
+    if (!targets.length) return;
+    targets.forEach(c => {
+        c.audioFx = getClipAudioFx(c);
+        if (!c.baseDuration) c.baseDuration = c.duration * (c.audioFx.clipSpeed || 1);
+        mutator(c.audioFx, c);
+        c.volume = Math.min(2, Math.max(0, c.audioFx.gain / 100));
+        applyAudioDspParams(c);
+        updateClipBadge(c);
+        drawClipFilmstrip(c, true);
+    });
+    syncClips();
+}
+
+audioPresetSelect.addEventListener('change', () => {
+    const presetKey = audioPresetSelect.value;
+    const presetValues = AUDIO_PRESET_MAP[presetKey] || {};
+    updateTargetsAudioFx((fx) => {
+        const keepFades = {
+            fadeIn: fx.fadeIn,
+            fadeOut: fx.fadeOut,
+            fadeCurve: fx.fadeCurve,
+            crossfade: fx.crossfade,
+            clipSpeed: fx.clipSpeed,
+            showEnvelope: fx.showEnvelope
+        };
+        Object.assign(fx, AUDIO_FX_DEFAULTS, keepFades, presetValues, { preset: presetKey });
+    });
+    if (audioConfigTarget) syncAudioConfigControls(audioConfigTarget);
+});
+
+audioConfigPopup.addEventListener('input', (e) => {
+    const slider = e.target.closest('[data-afx]');
+    if (!slider) return;
+    const key = slider.dataset.afx;
+    const val = parseFloat(slider.value);
+    const out = audioConfigPopup.querySelector(`[data-afx-val="${key}"]`);
+    if (out) out.textContent = formatAfxValue(key, val);
+
+    updateTargetsAudioFx((fx, clip) => {
+        fx[key] = val;
+        if (key === 'clipSpeed') {
+            const newDur = Math.max(0.1, clip.baseDuration / val);
+            clip.duration = newDur;
+            layoutClip(clip);
+            fitTimeline();
+        }
+    });
+});
+
+audioFadeCurveSelect.addEventListener('change', () => {
+    updateTargetsAudioFx((fx) => { fx.fadeCurve = audioFadeCurveSelect.value; });
+});
+audioReverbSizeSelect.addEventListener('change', () => {
+    updateTargetsAudioFx((fx) => { fx.reverbSize = audioReverbSizeSelect.value; });
+});
+audioCompCheck.addEventListener('change', () => {
+    updateTargetsAudioFx((fx) => { fx.compressorOn = audioCompCheck.checked; });
+});
+audioLimiterCheck.addEventListener('change', () => {
+    updateTargetsAudioFx((fx) => { fx.limiterOn = audioLimiterCheck.checked; });
+});
+audioPitchLinkedCheck.addEventListener('change', () => {
+    updateTargetsAudioFx((fx) => { fx.pitchLinked = audioPitchLinkedCheck.checked; });
+});
+audioEnvelopeCheck.addEventListener('change', () => {
+    updateTargetsAudioFx((fx) => { fx.showEnvelope = audioEnvelopeCheck.checked; });
+});
+
+// Normalización automática calculada desde los picos reales del fragmento
+audioNormalizeBtn.addEventListener('click', async () => {
+    const targets = getAudioConfigTargets();
+    if (!targets.length) return;
+    for (const c of targets) {
+        if (c.source && !c.source.peaks && !c.source.peaksBusy) {
+            await buildAudioPeaks(c.source);
+        }
+        let maxPeak = 0;
+        if (c.source && c.source.peaks) {
+            const peaks = c.source.peaks;
+            const i0 = Math.max(0, Math.floor(c.srcStart * PEAKS_PER_SEC));
+            const i1 = Math.min(peaks.length / 2, Math.ceil((c.srcStart + c.duration) * PEAKS_PER_SEC));
+            for (let i = i0; i < i1; i++) {
+                maxPeak = Math.max(maxPeak, Math.abs(peaks[i * 2]), Math.abs(peaks[i * 2 + 1]));
+            }
+        }
+        const neededGain = maxPeak > 0.005 ? Math.min(200, Math.round((0.95 / maxPeak) * 100)) : 130;
+        const extraDb = maxPeak > 0.005 && (0.95 / maxPeak) > 2
+            ? Math.min(12, Math.round(20 * Math.log10((0.95 / maxPeak) / 2) * 2) / 2)
+            : 0;
+        c.audioFx = getClipAudioFx(c);
+        c.audioFx.gain = neededGain;
+        c.audioFx.boostDb = extraDb;
+        c.audioFx.normalizeTarget = 95;
+        c.audioFx.limiterOn = true;
+        c.volume = neededGain / 100;
+        applyAudioDspParams(c);
+        updateClipBadge(c);
+        drawClipFilmstrip(c, true);
+    }
+    if (audioConfigTarget) syncAudioConfigControls(audioConfigTarget);
+    syncClips();
+});
+
+audioCopyFxBtn.addEventListener('click', () => {
+    if (!audioConfigTarget) return;
+    copyAudioSettingsFromClip(audioConfigTarget);
+    audioPasteFxBtn.disabled = false;
+});
+
+audioPasteFxBtn.addEventListener('click', () => {
+    const targets = getAudioConfigTargets();
+    if (!targets.length || !copiedAudioSettings) return;
+    targets.forEach(c => pasteAudioSettingsToClip(c));
+    if (audioConfigTarget) syncAudioConfigControls(audioConfigTarget);
+});
+
+audioResetFxBtn.addEventListener('click', () => {
+    updateTargetsAudioFx((fx, clip) => {
+        Object.assign(fx, AUDIO_FX_DEFAULTS);
+        if (clip.baseDuration) {
+            clip.duration = clip.baseDuration;
+            layoutClip(clip);
+            fitTimeline();
+        }
+    });
+    if (audioConfigTarget) syncAudioConfigControls(audioConfigTarget);
+});
+
+// --- 3. Cadena DSP Web Audio en tiempo real (EQ, Filtros, Compresor, Limitador, Reverb, Delay, Pan) ---
+const reverbImpulseCache = {};
+
+function getReverbImpulse(ctx, size) {
+    const key = `${ctx.sampleRate}_${size}`;
+    if (reverbImpulseCache[key]) return reverbImpulseCache[key];
+    const duration = size === 'hall' ? 2.4 : size === 'plate' ? 1.4 : 0.75;
+    const decay = size === 'hall' ? 2.2 : size === 'plate' ? 3.0 : 3.8;
+    const len = Math.floor(ctx.sampleRate * duration);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+        const data = buf.getChannelData(ch);
+        for (let i = 0; i < len; i++) {
+            data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+        }
+    }
+    reverbImpulseCache[key] = buf;
+    return buf;
+}
+
+const _origEnsureAudioGraph = ensureAudioGraph;
+ensureAudioGraph = function() {
+    _origEnsureAudioGraph();
+    if (!audioCtx || !speakerGain || !currentProjectId) return;
+
+    for (const clip of Object.values(currentProject().clips)) {
+        if (clip.type === 'image' || clip.type === 'text' || !clip.video || !clip.audioSource || !clip.gainNode) continue;
+        if (clip.dsp) {
+            applyAudioDspParams(clip);
+            continue;
+        }
+
+        try {
+            clip.audioSource.disconnect();
+        } catch (e) {}
+
+        const hpf = audioCtx.createBiquadFilter();
+        hpf.type = 'highpass';
+
+        const lpf = audioCtx.createBiquadFilter();
+        lpf.type = 'lowpass';
+
+        const eqLow = audioCtx.createBiquadFilter();
+        eqLow.type = 'lowshelf';
+        eqLow.frequency.value = 200;
+
+        const eqMid = audioCtx.createBiquadFilter();
+        eqMid.type = 'peaking';
+        eqMid.frequency.value = 1200;
+        eqMid.Q.value = 1.0;
+
+        const eqHigh = audioCtx.createBiquadFilter();
+        eqHigh.type = 'highshelf';
+        eqHigh.frequency.value = 4500;
+
+        const compressor = audioCtx.createDynamicsCompressor();
+        const limiter = audioCtx.createDynamicsCompressor();
+        limiter.threshold.value = -1.0;
+        limiter.knee.value = 0;
+        limiter.ratio.value = 20;
+        limiter.attack.value = 0.002;
+        limiter.release.value = 0.05;
+
+        const dryGain = audioCtx.createGain();
+        const convolver = audioCtx.createConvolver();
+        const reverbGain = audioCtx.createGain();
+
+        const delayNode = audioCtx.createDelay(2.0);
+        const delayFeedback = audioCtx.createGain();
+        const delayWet = audioCtx.createGain();
+
+        const panner = audioCtx.createStereoPanner ? audioCtx.createStereoPanner() : null;
+
+        // Cadena serial principal: Source -> HPF -> LPF -> EQ Low -> EQ Mid -> EQ High -> Compressor -> Limiter
+        clip.audioSource.connect(hpf);
+        hpf.connect(lpf);
+        lpf.connect(eqLow);
+        eqLow.connect(eqMid);
+        eqMid.connect(eqHigh);
+        eqHigh.connect(compressor);
+        compressor.connect(limiter);
+
+        // Envíos paralelos: Dry + Reverb + Delay -> Panner -> gainNode (volumen/fades)
+        const postSum = panner || clip.gainNode;
+        limiter.connect(dryGain);
+        dryGain.connect(postSum);
+
+        limiter.connect(convolver);
+        convolver.connect(reverbGain);
+        reverbGain.connect(postSum);
+
+        limiter.connect(delayNode);
+        delayNode.connect(delayFeedback);
+        delayFeedback.connect(delayNode);
+        delayNode.connect(delayWet);
+        delayWet.connect(postSum);
+
+        if (panner) panner.connect(clip.gainNode);
+
+        clip.dsp = {
+            hpf, lpf, eqLow, eqMid, eqHigh,
+            compressor, limiter,
+            dryGain, convolver, reverbGain, reverbSize: '',
+            delayNode, delayFeedback, delayWet,
+            panner
+        };
+
+        applyAudioDspParams(clip);
+    }
+};
+
+function applyAudioDspParams(clip) {
+    if (!clip || !clip.dsp || !audioCtx) return;
+    const fx = getClipAudioFx(clip);
+    const d = clip.dsp;
+
+    d.hpf.frequency.value = Math.max(20, fx.highPassFreq);
+    d.lpf.frequency.value = Math.min(20000, fx.lowPassFreq);
+    d.eqLow.gain.value = fx.eqLow;
+    d.eqMid.gain.value = fx.eqMid;
+    d.eqHigh.gain.value = fx.eqHigh;
+
+    if (fx.compressorOn) {
+        d.compressor.threshold.value = fx.compThreshold;
+        d.compressor.ratio.value = fx.compRatio;
+        d.compressor.knee.value = 12;
+        d.compressor.attack.value = 0.01;
+        d.compressor.release.value = 0.15;
+    } else {
+        d.compressor.threshold.value = 0;
+        d.compressor.ratio.value = 1;
+    }
+
+    if (fx.limiterOn !== false) {
+        d.limiter.threshold.value = -1.0;
+        d.limiter.ratio.value = 20;
+    } else {
+        d.limiter.threshold.value = 0;
+        d.limiter.ratio.value = 1;
+    }
+
+    if (fx.reverbMix > 0) {
+        if (d.reverbSize !== fx.reverbSize) {
+            d.convolver.buffer = getReverbImpulse(audioCtx, fx.reverbSize || 'room');
+            d.reverbSize = fx.reverbSize || 'room';
+        }
+        d.reverbGain.gain.value = (fx.reverbMix / 100) * 0.85;
+    } else {
+        d.reverbGain.gain.value = 0;
+    }
+
+    d.delayNode.delayTime.value = Math.max(0.01, Math.min(2.0, fx.delayTime));
+    d.delayFeedback.gain.value = Math.max(0, Math.min(0.85, fx.delayFeedback / 100));
+    d.delayWet.gain.value = fx.delayMix > 0 ? (fx.delayMix / 100) * 0.75 : 0;
+
+    if (d.panner) {
+        d.panner.pan.value = Math.max(-1, Math.min(1, fx.pan / 100));
+    }
+}
+
+// Cálculo dinámico de envolvente: Fade In, Fade Out, Curva, Crossfade automático y Puerta de ruido
+function applyFadeCurve(t, mode) {
+    t = Math.max(0, Math.min(1, t));
+    if (mode === 'linear') return t;
+    if (mode === 'sharp') return t * t * t;
+    return t * t * (3 - 2 * t); // 'smooth' (curva S)
+}
+
+function computeClipEnvelopeGain(clip, localT) {
+    const fx = getClipAudioFx(clip);
+    const baseGain = (fx.gain / 100) * Math.pow(10, (fx.boostDb || 0) / 20);
+    let env = 1.0;
+
+    // Fade in
+    if (fx.fadeIn > 0 && localT < fx.fadeIn) {
+        env *= applyFadeCurve(localT / fx.fadeIn, fx.fadeCurve);
+    }
+
+    // Fade out
+    const rem = clip.duration - localT;
+    if (fx.fadeOut > 0 && rem < fx.fadeOut) {
+        env *= applyFadeCurve(rem / fx.fadeOut, fx.fadeCurve);
+    }
+
+    // Fundido cruzado (Crossfade) con clips adyacentes o solapados en la misma fila
+    if (fx.crossfade > 0 && clip.el && clip.el.parentElement) {
+        const siblings = clipsInRow(clip.el.parentElement, clip);
+        for (const other of siblings) {
+            // Si otro clip termina justo donde empieza este
+            if (Math.abs((other.start + other.duration) - clip.start) <= 0.15 && localT < fx.crossfade) {
+                env *= applyFadeCurve(localT / fx.crossfade, 'smooth');
+            }
+            // Si otro clip empieza justo donde termina este
+            if (Math.abs(other.start - (clip.start + clip.duration)) <= 0.15 && rem < fx.crossfade) {
+                env *= applyFadeCurve(rem / fx.crossfade, 'smooth');
+            }
+        }
+    }
+
+    // Puerta de ruido (Noise gate) basada en los picos analizados del fragmento
+    if (fx.noiseGateThreshold > -60 && clip.source && clip.source.peaks) {
+        const peaks = clip.source.peaks;
+        const srcPos = (clip.srcStart || 0) + localT;
+        const idx = Math.floor(srcPos * PEAKS_PER_SEC);
+        if (idx >= 0 && idx * 2 + 1 < peaks.length) {
+            const pk = Math.max(Math.abs(peaks[idx * 2]), Math.abs(peaks[idx * 2 + 1]));
+            const db = pk > 0.00001 ? 20 * Math.log10(pk) : -100;
+            if (db < fx.noiseGateThreshold) {
+                env *= 0.04; // Atenúa respiraciones o zumbido de fondo en pausas
+            }
+        }
+    }
+
+    return baseGain * env;
+}
+
+// Sobrescribe syncClips para aplicar envolventes, velocidad individual y pitch en tiempo real
+const _origSyncClips = syncClips;
+syncClips = function() {
+    if (!currentProjectId) return;
+    if (hasCustomAnyAudioFx() && !audioCtx) {
+        ensureAudioGraph();
+    }
+    _origSyncClips();
+
+    for (const clip of Object.values(currentProject().clips)) {
+        if (clip.type === 'image' || clip.type === 'text' || !clip.video) continue;
+        if (!clip.el || !clip.el.isConnected) continue;
+
+        const v = clip.video;
+        const row = clip.el.parentElement;
+        const local = clock.t - clip.start;
+        const active = local >= 0 && local < clip.duration;
+        if (!active) continue;
+
+        const fx = getClipAudioFx(clip);
+        const clipSpd = fx.clipSpeed || 1;
+        const pitchFactor = Math.pow(2, (fx.pitchSemitones || 0) / 12);
+
+        // Velocidad individual combinada con velocidad global del proyecto
+        const targetRate = playbackSpeed * clipSpd * (fx.pitchLinked ? 1 : (fx.pitchSemitones !== 0 ? pitchFactor : 1));
+        const clampedRate = Math.min(4, Math.max(0.25, targetRate));
+        if (Math.abs(v.playbackRate - clampedRate) > 0.001) v.playbackRate = clampedRate;
+
+        // Control de afinación (preservesPitch)
+        const wantPreserve = !fx.pitchLinked && fx.pitchSemitones === 0;
+        if ('preservesPitch' in v && v.preservesPitch !== wantPreserve) v.preservesPitch = wantPreserve;
+        if ('webkitPreservesPitch' in v && v.webkitPreservesPitch !== wantPreserve) v.webkitPreservesPitch = wantPreserve;
+
+        // Re-sincronizar posición interna del archivo teniendo en cuenta la velocidad individual del clip
+        const srcT = (clip.srcStart || 0) + local * clipSpd;
+        const tol = (exporting ? 0.6 : DRIFT_TOLERANCE) * Math.max(1, clampedRate);
+        if (clock.playing) {
+            if (Math.abs(v.currentTime - srcT) > tol) v.currentTime = srcT;
+        } else {
+            if (Math.abs(v.currentTime - srcT) > 0.03) v.currentTime = srcT;
+        }
+
+        // Aplicar ganancia calculada con Fade In/Out, Crossfade, Boost y Noise Gate
+        const silent = clip.muted || (row && row.classList.contains('muted'));
+        const dynamicGain = silent ? 0 : computeClipEnvelopeGain(clip, local);
+
+        if (clip.gainNode) {
+            if (Math.abs(clip.gainNode.gain.value - dynamicGain) > 0.001) {
+                clip.gainNode.gain.value = dynamicGain;
+            }
+        } else {
+            const fallbackVol = Math.min(1, Math.max(0, masterVolume * dynamicGain));
+            if (Math.abs(v.volume - fallbackVol) > 0.005) v.volume = fallbackVol;
+        }
+    }
+};
+
+function hasCustomAnyAudioFx() {
+    if (!currentProjectId || !projects[currentProjectId]) return false;
+    return Object.values(projects[currentProjectId].clips).some(hasCustomAudioFx);
+}
+
+// --- 4. Medidor visual en el oscilograma (línea de ganancia y curvas de Fade In / Fade Out) ---
+const _origDrawAudioWaveform = drawAudioWaveform;
+drawAudioWaveform = function(clip, force = false) {
+    const fx = getClipAudioFx(clip);
+    const fxSig = JSON.stringify(fx);
+    const changedFx = clip._lastAudioFxSig !== fxSig;
+    clip._lastAudioFxSig = fxSig;
+
+    _origDrawAudioWaveform(clip, force || changedFx);
+
+    const cv = clip.thumbs;
+    const ctx = clip.thumbCtx;
+    if (!cv || !ctx || fx.showEnvelope === false) return;
+
+    const w = cv.width;
+    const H = cv.height;
+    if (w < 4 || H < 4) return;
+
+    // Dibujar línea envolvente de ganancia y fundidos sobre el oscilograma
+    ctx.save();
+    ctx.strokeStyle = '#ffffff';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.lineWidth = 1.5;
+
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x = 0; x <= w; x += 2) {
+        const t = (x / w) * clip.duration;
+        const g = computeClipEnvelopeGain(clip, t);
+        // Escala visual: 100% = mitad superior (0.45 * H), 200%+ = techo superior
+        const norm = Math.min(1, g / 2.2);
+        const y = Math.round(H - 3 - norm * (H - 8));
+        ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    for (let x = 0; x <= w; x += 2) {
+        const t = (x / w) * clip.duration;
+        const g = computeClipEnvelopeGain(clip, t);
+        const norm = Math.min(1, g / 2.2);
+        const y = Math.round(H - 3 - norm * (H - 8));
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+};
+
+// Actualizar etiquetas (badges) de los clips de audio con los efectos activos
+const _origUpdateClipBadge = updateClipBadge;
+updateClipBadge = function(clip) {
+    _origUpdateClipBadge(clip);
+    if (clip.type !== 'audio') return;
+    const fx = getClipAudioFx(clip);
+    const extra = [];
+    if (fx.preset && fx.preset !== 'none') extra.push(`FX: ${fx.preset}`);
+    if (fx.gain !== 100 || fx.boostDb > 0) extra.push(`Gan. ${fx.gain}%${fx.boostDb > 0 ? ` +${fx.boostDb}dB` : ''}`);
+    if (fx.fadeIn > 0 || fx.fadeOut > 0) extra.push(`Fade ${fx.fadeIn}s/${fx.fadeOut}s`);
+    if (fx.clipSpeed !== 1) extra.push(`x${fx.clipSpeed.toFixed(2)}`);
+    if (fx.pitchSemitones !== 0) extra.push(`${fx.pitchSemitones > 0 ? '+' : ''}${fx.pitchSemitones}st`);
+    if (fx.pan !== 0) extra.push(fx.pan < 0 ? `L${Math.abs(fx.pan)}` : `R${fx.pan}`);
+    if (extra.length) {
+        clip.badge.textContent = clip.badge.textContent
+            ? `${clip.badge.textContent} · ${extra.join(' · ')}`
+            : extra.join(' · ');
+    }
+};
+
+// --- 5. Zona de audio (análogo a Modo color: arrastrar tramo para aislar y configurar) ---
+const AUDIO_ZONE_HINT = 'ZONA DE AUDIO · arrastra un tramo sobre la línea de tiempo para aislar y configurar ese fragmento · Esc para salir';
+
+const audioZoneSelection = document.createElement('div');
+audioZoneSelection.className = 'audio-zone-selection';
+const audioZoneSelectionLabel = document.createElement('span');
+audioZoneSelectionLabel.className = 'audio-zone-selection-label';
+audioZoneSelection.appendChild(audioZoneSelectionLabel);
+timelineEl.appendChild(audioZoneSelection);
+
+const audioZoneBanner = document.createElement('div');
+audioZoneBanner.className = 'audio-zone-banner hidden';
+document.body.appendChild(audioZoneBanner);
+
+let audioZoneDrag = null;
+
+function enterAudioZoneMode() {
+    if (!currentProjectId || exporting || audioZoneMode) return;
+    exitTrimMode();
+    exitFilterMode();
+    pause();
+    hideMenus();
+    audioZoneMode = true;
+    document.body.classList.add('audio-zone-mode');
+    audioZoneBanner.textContent = AUDIO_ZONE_HINT;
+    audioZoneBanner.classList.remove('hidden');
+}
+
+function exitAudioZoneMode() {
+    if (!audioZoneMode) return;
+    endAudioZoneDrag();
+    audioZoneMode = false;
+    document.body.classList.remove('audio-zone-mode');
+    audioZoneBanner.classList.add('hidden');
+}
+
+function toggleAudioZoneMode() {
+    if (audioZoneMode) exitAudioZoneMode(); else enterAudioZoneMode();
+}
+
+function updateAudioZoneSelection() {
+    const d = audioZoneDrag;
+    if (!d) return;
+    const tl = timelineEl.getBoundingClientRect();
+    const cx = d.lastX - tl.left;
+    const cy = d.lastY - tl.top;
+    const maxT = timelineSeconds();
+    const toTime = (x) => snapTime(Math.min(maxT, Math.max(0, (x - 1) / PX_PER_SEC)));
+
+    const a = toTime(Math.min(d.x0, cx));
+    const b = toTime(Math.max(d.x0, cx));
+    const rows = trimRowsBetween(d.y0, cy, tl.top);
+    d.t0 = a;
+    d.t1 = b;
+    d.rows = rows;
+
+    if (!rows.length) {
+        audioZoneSelection.style.display = 'none';
+        return;
+    }
+    const top = rows[0].getBoundingClientRect().top - tl.top;
+    const bottom = rows[rows.length - 1].getBoundingClientRect().bottom - tl.top;
+    audioZoneSelection.style.display = 'block';
+    audioZoneSelection.style.left = `${a * PX_PER_SEC + 1}px`;
+    audioZoneSelection.style.width = `${Math.max(0, (b - a) * PX_PER_SEC)}px`;
+    audioZoneSelection.style.top = `${top}px`;
+    audioZoneSelection.style.height = `${bottom - top}px`;
+    audioZoneSelectionLabel.textContent = `Audio · ${(b - a).toFixed(1)} s`;
+}
+
+function onAudioZoneMove(ev) {
+    if (!audioZoneDrag) return;
+    audioZoneDrag.lastX = ev.clientX;
+    audioZoneDrag.lastY = ev.clientY;
+    updateAudioZoneSelection();
+}
+function onAudioZoneScroll() { updateAudioZoneSelection(); }
+function onAudioZoneUp(ev) {
+    const d = audioZoneDrag;
+    if (!d) return;
+    d.lastX = ev.clientX;
+    d.lastY = ev.clientY;
+    updateAudioZoneSelection();
+    const { t0, t1, rows } = d;
+    endAudioZoneDrag();
+    if (t1 - t0 >= MIN_TRIM && rows.length) applyAudioZoneRegion(t0, t1, rows);
+}
+function endAudioZoneDrag() {
+    window.removeEventListener('pointermove', onAudioZoneMove);
+    window.removeEventListener('pointerup', onAudioZoneUp);
+    window.removeEventListener('pointercancel', endAudioZoneDrag);
+    window.removeEventListener('scroll', onAudioZoneScroll, true);
+    audioZoneDrag = null;
+    audioZoneSelection.style.display = 'none';
+}
+
+timelineEl.addEventListener('pointerdown', (e) => {
+    if (!audioZoneMode || trimBusy || exporting || !currentProjectId || e.button !== 0) return;
+    const tl = timelineEl.getBoundingClientRect();
+    const y0 = e.clientY - tl.top;
+    if (!trimRowsBetween(y0, y0, tl.top).length) return;
+
+    e.preventDefault();
+    hideMenus();
+    endAudioZoneDrag();
+    audioZoneDrag = { x0: e.clientX - tl.left, y0, lastX: e.clientX, lastY: e.clientY, t0: 0, t1: 0, rows: [] };
+
+    window.addEventListener('pointermove', onAudioZoneMove);
+    window.addEventListener('pointerup', onAudioZoneUp);
+    window.addEventListener('pointercancel', endAudioZoneDrag);
+    window.addEventListener('scroll', onAudioZoneScroll, true);
+    updateAudioZoneSelection();
+});
+
+function planRowAudioZoneSplit(row, t0, t1) {
+    const plan = [];
+    for (const el of Array.from(row.children)) {
+        const clip = el._clip;
+        if (!clip || clip.type !== 'audio') continue;
+
+        const s = clip.start;
+        const e = clip.start + clip.duration;
+        if (e <= t0 + EPS || s >= t1 - EPS) continue;
+
+        const cutA = Math.max(s, t0);
+        const cutB = Math.min(e, t1);
+        if (cutB - cutA < MIN_TRIM - EPS) continue;
+
+        const hasLeft = cutA > s + EPS;
+        const hasRight = cutB < e - EPS;
+        const spd = getClipAudioFx(clip).clipSpeed || 1;
+
+        const segments = [];
+        if (hasLeft) {
+            segments.push({
+                role: 'left',
+                part: { start: s, srcStart: clip.srcStart, duration: cutA - s }
+            });
+        }
+        segments.push({
+            role: 'target',
+            part: { start: cutA, srcStart: clip.srcStart + (cutA - s) * spd, duration: cutB - cutA }
+        });
+        if (hasRight) {
+            segments.push({
+                role: 'right',
+                part: { start: cutB, srcStart: clip.srcStart + (cutB - s) * spd, duration: e - cutB }
+            });
+        }
+        plan.push({ clip, segments });
+    }
+    return plan;
+}
+
+async function applyAudioZoneRegion(t0, t1, rows) {
+    if (trimBusy || !currentProjectId) return;
+    const projectId = currentProjectId;
+    const project = currentProject();
+
+    const plans = [];
+    for (const row of rows) {
+        if (row.classList.contains('locked')) continue;
+        const plan = planRowAudioZoneSplit(row, t0, t1);
+        if (!plan.length) continue;
+        if (plan.some(p => p.clip.locked)) continue;
+        plans.push({ row, plan });
+    }
+    if (!plans.length) return;
+
+    trimBusy = true;
+    renderFrozen = true;
+    audioZoneBanner.textContent = 'Aislando zona de audio… un momento';
+
+    const created = [];
+    const targetClips = [];
+    let applied = false;
+
+    try {
+        for (const { plan } of plans) {
+            for (const item of plan) {
+                for (let idx = 0; idx < item.segments.length; idx++) {
+                    const seg = item.segments[idx];
+                    if (idx === 0) {
+                        seg.clipObj = item.clip;
+                    } else {
+                        const audioEl = await openClipVideo(item.clip.url, true);
+                        if (!audioEl) throw new Error('No se pudo abrir el audio para la zona');
+                        const frag = createFragmentClip(item.clip, audioEl);
+                        frag.audioFx = cloneAudioFx(getClipAudioFx(item.clip));
+                        seg.clipObj = frag;
+                        created.push(frag);
+                    }
+                    if (seg.role === 'target') targetClips.push(seg.clipObj);
+                }
+            }
+        }
+        if (projectId !== currentProjectId) throw new Error('cancelado');
+
+        for (const { row, plan } of plans) {
+            for (const item of plan) {
+                let anchorEl = item.clip.el;
+                for (let idx = 0; idx < item.segments.length; idx++) {
+                    const seg = item.segments[idx];
+                    const clip = seg.clipObj;
+                    setClipSpan(clip, seg.part);
+                    clip.baseDuration = clip.duration * (getClipAudioFx(clip).clipSpeed || 1);
+                    if (idx === 0) {
+                        layoutClip(clip);
+                    } else {
+                        project.clips[clip.id] = clip;
+                        placeClip(row, clip);
+                        row.insertBefore(clip.el, anchorEl.nextSibling);
+                        anchorEl = clip.el;
+                    }
+                }
+            }
+        }
+        applied = true;
+        ensureAudioGraph();
+        commit();
+    } catch (err) {
+        if (!applied) created.forEach(discardFragment);
+        if (err.message !== 'cancelado') {
+            console.error(err);
+            alert('No se pudo aislar la zona de audio.');
+        }
+    } finally {
+        renderFrozen = false;
+        trimBusy = false;
+        if (audioZoneMode) audioZoneBanner.textContent = AUDIO_ZONE_HINT;
+        if (currentProjectId) refreshPreview();
+    }
+
+    if (applied && targetClips.length) {
+        exitAudioZoneMode();
+        const primary = targetClips[0];
+        if (primary && primary.el && primary.el.isConnected) {
+            openAudioConfigPopup(primary, primary.el, targetClips);
+        }
+    }
+}
+
+// Salir de Zona de audio con Escape o al cambiar de proyecto
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && audioZoneMode) {
+        e.preventDefault();
+        exitAudioZoneMode();
+    }
+});
+
+const _origShowMainView = showMainView;
+showMainView = function(pushToHistory = true) {
+    exitAudioZoneMode();
+    closeAudioConfigPopup();
+    _origShowMainView(pushToHistory);
+};
