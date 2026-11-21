@@ -7999,3 +7999,610 @@ openAnimPopup = function(clip, anchorEl) {
     _origOpenAnimPopup(clip, anchorEl);
     if (window.syncAnimPivotInputs) window.syncAnimPivotInputs();
 };
+
+// =====================================================================
+//  PERSISTENCIA TOTAL EN INDEXEDDB (Sobrevive al cierre de pestaña / VS Code)
+//  Guarda: proyectos, portadas, archivos binarios (video/audio/imagen),
+//  recortes manuales (croppedCanvas), filas, tiempos, filtros, ajustes,
+//  audio DSP, animaciones, pivotes, formato de aspecto y velocidad.
+// =====================================================================
+(function initTotalPersistence() {
+    const DB_NAME = 'VideoEditorTotalDB_v1';
+    const DB_VERSION = 1;
+    let dbInstance = null;
+    let saveTimer = 0;
+    let isRestoring = false;
+
+    // Cache en memoria de Blobs originales indexados por URL de objeto o mediaKey
+    const blobByUrl = new Map();
+    const mediaKeyByUrl = new Map();
+
+    function openDB() {
+        if (dbInstance) return Promise.resolve(dbInstance);
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(DB_NAME, DB_VERSION);
+            req.onupgradeneeded = (e) => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains('state')) {
+                    db.createObjectStore('state', { keyPath: 'key' });
+                }
+                if (!db.objectStoreNames.contains('blobs')) {
+                    db.createObjectStore('blobs', { keyPath: 'id' });
+                }
+            };
+            req.onsuccess = () => {
+                dbInstance = req.result;
+                resolve(dbInstance);
+            };
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbPut(storeName, value) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readwrite');
+            tx.objectStore(storeName).put(value);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbGet(storeName, key) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readonly');
+            const req = tx.objectStore(storeName).get(key);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbDelete(storeName, key) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readwrite');
+            tx.objectStore(storeName).delete(key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async function dbGetAllKeys(storeName) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readonly');
+            const req = tx.objectStore(storeName).getAllKeys();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    function canvasToBlob(canvas) {
+        return new Promise((resolve) => {
+            if (!canvas) { resolve(null); return; }
+            canvas.toBlob((blob) => resolve(blob), 'image/png');
+        });
+    }
+
+    async function ensureBlobFromUrl(url) {
+        if (!url) return null;
+        if (blobByUrl.has(url)) return blobByUrl.get(url);
+        try {
+            const res = await fetch(url);
+            const blob = await res.blob();
+            blobByUrl.set(url, blob);
+            return blob;
+        } catch (err) {
+            console.warn('[Persistencia] No se pudo leer blob desde URL:', err);
+            return null;
+        }
+    }
+
+    // Interceptar URL.createObjectURL para capturar automáticamente cada archivo importado o miniatura
+    const _origCreateObjectURL = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = function(obj) {
+        const url = _origCreateObjectURL(obj);
+        if (obj instanceof Blob) {
+            blobByUrl.set(url, obj);
+        }
+        return url;
+    };
+
+    // Serializa el estado completo de un proyecto (incluyendo clips activos y en historial Undo/Redo)
+    function serializeProjectSnapshot(proj) {
+        const serializedClips = {};
+        for (const [cid, c] of Object.entries(proj.clips || {})) {
+            serializedClips[cid] = {
+                id: c.id,
+                type: c.type || 'video',
+                name: c.name || 'Sin nombre',
+                mediaKey: c.mediaKey || null,
+                duration: c.duration,
+                baseDuration: c.baseDuration || null,
+                aspect: c.aspect || 1,
+                srcStart: c.srcStart || 0,
+                start: c.start || 0,
+                chroma: c.chroma || 'none',
+                chromaManual: !!c.chromaManual,
+                filterType: c.filterType || 'none',
+                intensity: c.intensity ?? 100,
+                adjustments: getClipAdjustments(c),
+                audioFx: c.audioFx ? cloneAudioFx(c.audioFx) : null,
+                anim: c.anim ? { ...c.anim } : null,
+                color: c.color || AUDIO_DEFAULT_COLOR,
+                muted: !!c.muted,
+                volume: c.volume ?? 1,
+                locked: !!c.locked,
+                tf: c.tf ? { ...c.tf } : null,
+                cropMaskSaved: c.cropMaskSaved
+                    ? c.cropMaskSaved.map(poly => poly.map(p => ({ ...p })))
+                    : null,
+                hasCroppedCanvas: !!c.croppedCanvas,
+                txt: c.txt ? { ...c.txt } : undefined
+            };
+        }
+
+        return {
+            id: proj.id,
+            name: proj.name,
+            rowsWidth: proj.rowsWidth || '500px',
+            rowsData: proj.rowsData || [],
+            speed: proj.speed || 1,
+            aspectW: proj.aspectW || 16,
+            aspectH: proj.aspectH || 9,
+            hasThumb: !!proj.thumbUrl,
+            clips: serializedClips
+        };
+    }
+
+    async function persistAllNow() {
+        if (isRestoring) return;
+        try {
+            if (currentProjectId && projects[currentProjectId]) {
+                saveCurrentProjectRows();
+                projects[currentProjectId].speed = playbackSpeed;
+                projects[currentProjectId].aspectW = currentAspectW;
+                projects[currentProjectId].aspectH = currentAspectH;
+            }
+
+            const neededBlobIds = new Set();
+            const projectsPayload = {};
+
+            for (const [pid, proj] of Object.entries(projects)) {
+                // Guardar miniatura del proyecto si existe
+                if (proj.thumbUrl) {
+                    const thumbBlobId = `thumb_${pid}`;
+                    neededBlobIds.add(thumbBlobId);
+                    if (!proj._thumbPersisted) {
+                        const tBlob = await ensureBlobFromUrl(proj.thumbUrl);
+                        if (tBlob) {
+                            await dbPut('blobs', { id: thumbBlobId, blob: tBlob, name: 'thumb', type: tBlob.type });
+                            proj._thumbPersisted = true;
+                        }
+                    }
+                }
+
+                // Guardar medios binarios y recortes manuales de cada clip
+                for (const [cid, c] of Object.entries(proj.clips || {})) {
+                    if (c.type !== 'text' && c.url) {
+                        let mKey = c.mediaKey || mediaKeyByUrl.get(c.url);
+                        if (!mKey) {
+                            mKey = `media_${pid}_${cid}`;
+                            mediaKeyByUrl.set(c.url, mKey);
+                        }
+                        c.mediaKey = mKey;
+                        neededBlobIds.add(mKey);
+
+                        if (!c._mediaPersisted) {
+                            const mBlob = await ensureBlobFromUrl(c.url);
+                            if (mBlob) {
+                                await dbPut('blobs', { id: mKey, blob: mBlob, name: c.name, type: mBlob.type });
+                                c._mediaPersisted = true;
+                            }
+                        }
+                    }
+
+                    if (c.type === 'image' && c.croppedCanvas) {
+                        const cropBlobId = `crop_${pid}_${cid}`;
+                        neededBlobIds.add(cropBlobId);
+                        if (!c._cropPersisted) {
+                            const cBlob = await canvasToBlob(c.croppedCanvas);
+                            if (cBlob) {
+                                await dbPut('blobs', { id: cropBlobId, blob: cBlob, name: `${c.name}_crop.png`, type: 'image/png' });
+                                c._cropPersisted = true;
+                            }
+                        }
+                    }
+                }
+
+                projectsPayload[pid] = serializeProjectSnapshot(proj);
+            }
+
+            await dbPut('state', {
+                key: 'workspace',
+                projectCount,
+                projects: projectsPayload,
+                savedAt: Date.now()
+            });
+
+            // Limpiar blobs huérfanos de proyectos eliminados
+            const existingKeys = await dbGetAllKeys('blobs');
+            for (const k of existingKeys) {
+                if (!neededBlobIds.has(k)) {
+                    await dbDelete('blobs', k);
+                }
+            }
+        } catch (err) {
+            console.error('[Persistencia] Error guardando estado completo:', err);
+        }
+    }
+
+    function schedulePersist(delayMs = 300) {
+        if (isRestoring) return;
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            persistAllNow();
+        }, delayMs);
+    }
+
+    // --- Reconstrucción de tarjetas de proyecto en la vista principal ---
+    function createProjectCardDOM(proj) {
+        const card = document.createElement('div');
+        card.className = 'project-card';
+
+        const box = document.createElement('div');
+        box.className = 'project-box';
+
+        if (proj.thumbUrl) {
+            const img = document.createElement('img');
+            img.className = 'project-thumb';
+            img.alt = '';
+            img.draggable = false;
+            img.src = proj.thumbUrl;
+            box.appendChild(img);
+        }
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'project-name';
+        input.value = proj.name;
+
+        input.addEventListener('input', () => {
+            proj.name = input.value;
+            schedulePersist(250);
+        });
+
+        box.addEventListener('click', () => {
+            openProjectView(proj.id, true);
+        });
+
+        input.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+
+        box.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            showProjectContextMenu(e.clientX, e.clientY, proj.id, card);
+        });
+
+        card.appendChild(box);
+        card.appendChild(input);
+        grid.appendChild(card);
+    }
+
+    // --- Reconstrucción de medios desde IndexedDB ---
+    function loadImageElementFromUrl(url) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.decoding = 'async';
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+            img.src = url;
+        });
+    }
+
+    function loadVideoElementFromUrl(url) {
+        return new Promise((resolve) => {
+            const video = document.createElement('video');
+            video.preload = 'auto';
+            video.playsInline = true;
+            const timer = setTimeout(() => resolve(null), 20000);
+            video.addEventListener('loadeddata', () => {
+                clearTimeout(timer);
+                attachSeekedRender(video);
+                resolve(video);
+            }, { once: true });
+            video.addEventListener('error', () => {
+                clearTimeout(timer);
+                resolve(null);
+            }, { once: true });
+            video.src = url;
+        });
+    }
+
+    function loadAudioElementFromUrl(url) {
+        return new Promise((resolve) => {
+            const audio = document.createElement('audio');
+            audio.preload = 'auto';
+            const timer = setTimeout(() => resolve(null), 15000);
+            audio.addEventListener('loadedmetadata', () => {
+                clearTimeout(timer);
+                resolve(audio);
+            }, { once: true });
+            audio.addEventListener('error', () => {
+                clearTimeout(timer);
+                resolve(null);
+            }, { once: true });
+            audio.src = url;
+        });
+    }
+
+    async function restoreAllFromDB() {
+        isRestoring = true;
+        try {
+            const saved = await dbGet('state', 'workspace');
+            if (!saved || !saved.projects) return;
+
+            projectCount = saved.projectCount || 0;
+            const sharedSourcesByMediaKey = new Map();
+
+            for (const [pid, pData] of Object.entries(saved.projects)) {
+                let thumbUrl = null;
+                if (pData.hasThumb) {
+                    const tRec = await dbGet('blobs', `thumb_${pid}`);
+                    if (tRec && tRec.blob) {
+                        thumbUrl = _origCreateObjectURL(tRec.blob);
+                        blobByUrl.set(thumbUrl, tRec.blob);
+                    }
+                }
+
+                const restoredClips = {};
+                const urlByMediaKey = new Map();
+
+                for (const [cid, cData] of Object.entries(pData.clips || {})) {
+                    let url = null;
+                    if (cData.type !== 'text' && cData.mediaKey) {
+                        if (urlByMediaKey.has(cData.mediaKey)) {
+                            url = urlByMediaKey.get(cData.mediaKey);
+                        } else {
+                            const mRec = await dbGet('blobs', cData.mediaKey);
+                            if (mRec && mRec.blob) {
+                                url = _origCreateObjectURL(mRec.blob);
+                                blobByUrl.set(url, mRec.blob);
+                                mediaKeyByUrl.set(url, cData.mediaKey);
+                                urlByMediaKey.set(cData.mediaKey, url);
+                            }
+                        }
+                        if (!url) continue; // Si falta el binario, se omite este clip
+                    }
+
+                    const clip = {
+                        id: cData.id,
+                        type: cData.type || 'video',
+                        name: cData.name,
+                        mediaKey: cData.mediaKey || null,
+                        url,
+                        image: null,
+                        video: null,
+                        duration: cData.duration,
+                        baseDuration: cData.baseDuration || cData.duration,
+                        aspect: cData.aspect || 1,
+                        source: null,
+                        srcStart: cData.srcStart || 0,
+                        start: cData.start || 0,
+                        chroma: cData.chroma || 'none',
+                        chromaManual: !!cData.chromaManual,
+                        filterType: cData.filterType || 'none',
+                        intensity: cData.intensity ?? 100,
+                        adjustments: { ...ADJUSTMENT_DEFAULTS, ...(cData.adjustments || {}) },
+                        audioFx: cData.audioFx ? cloneAudioFx(cData.audioFx) : null,
+                        anim: cData.anim ? { ...ANIM_DEFAULTS, ...cData.anim } : null,
+                        color: cData.color || AUDIO_DEFAULT_COLOR,
+                        muted: !!cData.muted,
+                        volume: cData.volume ?? 1,
+                        locked: !!cData.locked,
+                        tf: cData.tf ? { ...cData.tf } : null,
+                        cropMaskSaved: cData.cropMaskSaved || null,
+                        croppedCanvas: null,
+                        txt: cData.txt ? { ...cData.txt } : undefined,
+                        textCanvas: null,
+                        textKey: '',
+                        textSS: TEXT_SS,
+                        el: null,
+                        thumbs: null,
+                        thumbCtx: null,
+                        thumbKey: '',
+                        disposed: false,
+                        badge: null,
+                        _mediaPersisted: true,
+                        _cropPersisted: true
+                    };
+
+                    if (clip.type === 'image') {
+                        clip.image = await loadImageElementFromUrl(url);
+                        if (!clip.image) continue;
+                        if (cData.hasCroppedCanvas) {
+                            const cropRec = await dbGet('blobs', `crop_${pid}_${cid}`);
+                            if (cropRec && cropRec.blob) {
+                                const cropUrl = _origCreateObjectURL(cropRec.blob);
+                                const cropImg = await loadImageElementFromUrl(cropUrl);
+                                if (cropImg) {
+                                    const cv = document.createElement('canvas');
+                                    cv.width = cropImg.naturalWidth;
+                                    cv.height = cropImg.naturalHeight;
+                                    cv.getContext('2d').drawImage(cropImg, 0, 0);
+                                    clip.croppedCanvas = cv;
+                                }
+                                URL.revokeObjectURL(cropUrl);
+                            }
+                        }
+                    } else if (clip.type === 'video') {
+                        clip.video = await loadVideoElementFromUrl(url);
+                        if (!clip.video) continue;
+
+                        if (sharedSourcesByMediaKey.has(clip.mediaKey)) {
+                            clip.source = sharedSourcesByMediaKey.get(clip.mediaKey);
+                        } else {
+                            const fullDur = clip.video.duration || clip.duration;
+                            const asp = clip.video.videoWidth / Math.max(1, clip.video.videoHeight);
+                            const strip = document.createElement('canvas');
+                            strip.width = Math.min(MAX_THUMB_W, Math.max(1, Math.ceil(fullDur * PX_PER_SEC)));
+                            strip.height = THUMB_H;
+                            const stripCtx = strip.getContext('2d', { alpha: false });
+                            stripCtx.fillStyle = '#1a1a1a';
+                            stripCtx.fillRect(0, 0, strip.width, strip.height);
+                            const srcObj = {
+                                url,
+                                duration: fullDur,
+                                aspect: asp,
+                                thumbs: strip,
+                                thumbCtx: stripCtx,
+                                thumbBusy: false,
+                                disposed: false,
+                                clips: new Set()
+                            };
+                            sharedSourcesByMediaKey.set(clip.mediaKey, srcObj);
+                            clip.source = srcObj;
+                        }
+                        clip.source.clips.add(clip);
+                    } else if (clip.type === 'audio') {
+                        clip.video = await loadAudioElementFromUrl(url);
+                        if (!clip.video) continue;
+
+                        if (sharedSourcesByMediaKey.has(clip.mediaKey)) {
+                            clip.source = sharedSourcesByMediaKey.get(clip.mediaKey);
+                        } else {
+                            const fullDur = clip.video.duration || clip.duration;
+                            const srcObj = {
+                                url,
+                                name: clip.name,
+                                duration: fullDur,
+                                aspect: 1,
+                                peaks: null,
+                                peakGain: 1,
+                                peaksBusy: false,
+                                disposed: false,
+                                clips: new Set()
+                            };
+                            sharedSourcesByMediaKey.set(clip.mediaKey, srcObj);
+                            clip.source = srcObj;
+                        }
+                        clip.source.clips.add(clip);
+                    }
+
+                    restoredClips[cid] = clip;
+                }
+
+                projects[pid] = {
+                    id: pid,
+                    name: pData.name,
+                    rowsWidth: pData.rowsWidth || '500px',
+                    rowsData: pData.rowsData || [],
+                    speed: pData.speed || 1,
+                    aspectW: pData.aspectW || 16,
+                    aspectH: pData.aspectH || 9,
+                    thumbUrl,
+                    _thumbPersisted: !!thumbUrl,
+                    clips: restoredClips
+                };
+
+                createProjectCardDOM(projects[pid]);
+            }
+        } catch (err) {
+            console.error('[Persistencia] Error restaurando proyectos desde IndexedDB:', err);
+        } finally {
+            isRestoring = false;
+        }
+    }
+
+    // --- Hooks sobre todas las acciones que modifican datos ---
+    const _origCommit = commit;
+    commit = function() {
+        _origCommit();
+        schedulePersist(200);
+    };
+
+    addBtn.addEventListener('click', () => {
+        const ids = Object.keys(projects);
+        const lastProj = projects[ids[ids.length - 1]];
+        if (lastProj) {
+            const cards = grid.querySelectorAll('.project-card');
+            const lastCard = cards[cards.length - 1];
+            const inp = lastCard && lastCard.querySelector('.project-name');
+            if (inp) {
+                inp.addEventListener('input', () => schedulePersist(250));
+            }
+        }
+        schedulePersist(150);
+    });
+
+    const _origSetProjectThumbnail = setProjectThumbnail;
+    setProjectThumbnail = function(projectId, box, file) {
+        _origSetProjectThumbnail(projectId, box, file);
+        if (projects[projectId]) projects[projectId]._thumbPersisted = false;
+        schedulePersist(150);
+    };
+
+    const _origRemoveProjectThumbnail = removeProjectThumbnail;
+    removeProjectThumbnail = function(projectId, box) {
+        _origRemoveProjectThumbnail(projectId, box);
+        if (projects[projectId]) projects[projectId]._thumbPersisted = false;
+        schedulePersist(150);
+    };
+
+    document.getElementById('deleteProjectOption').addEventListener('click', () => {
+        schedulePersist(150);
+    });
+
+    cropAcceptBtn.addEventListener('click', () => {
+        setTimeout(() => {
+            if (cropTargetClip) cropTargetClip._cropPersisted = false;
+            if (selectedClip) selectedClip._cropPersisted = false;
+            schedulePersist(200);
+        }, 10);
+    });
+
+    const _origSetPlaybackSpeed = setPlaybackSpeed;
+    setPlaybackSpeed = function(value, save = true) {
+        _origSetPlaybackSpeed(value, save);
+        if (save) schedulePersist(250);
+    };
+
+    aspectMenu.addEventListener('click', () => {
+        if (currentProjectId && projects[currentProjectId]) {
+            projects[currentProjectId].aspectW = currentAspectW;
+            projects[currentProjectId].aspectH = currentAspectH;
+            schedulePersist(200);
+        }
+    });
+
+    // Al abrir un proyecto restaurado: aplicar su relación de aspecto y regenerar miniaturas/ondas en segundo plano
+    const _origOpenProjectView = openProjectView;
+    openProjectView = function(projectId, pushToHistory = true) {
+        _origOpenProjectView(projectId, pushToHistory);
+        const proj = projects[projectId];
+        if (!proj) return;
+
+        const w = proj.aspectW || 16;
+        const h = proj.aspectH || 9;
+        const opt = aspectMenu.querySelector(`.aspect-option[data-w="${w}"][data-h="${h}"]`);
+        if (opt) opt.click();
+
+        for (const clip of Object.values(proj.clips || {})) {
+            if (clip.type === 'video' && clip.source && !clip.source.thumbBusy) {
+                queueThumbnails(clip);
+            } else if (clip.type === 'audio' && clip.source && !clip.source.peaks && !clip.source.peaksBusy) {
+                queueAudioPeaks(clip.source);
+            }
+        }
+    };
+
+    // Guardado de emergencia antes de cerrar la pestaña o recargar
+    window.addEventListener('beforeunload', () => {
+        persistAllNow();
+    });
+
+    // Restaurar todo automáticamente al iniciar la página
+    restoreAllFromDB();
+})();
