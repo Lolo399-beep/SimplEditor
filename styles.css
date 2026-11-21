@@ -1824,3 +1824,224 @@ body.audio-zone-mode .row-handle {
 body.audio-zone-mode .ruler {
     cursor: not-allowed;
 }
+
+/* --- Panel de Animaciones (estilo PowerPoint) --- */
+.anim-popup {
+    position: fixed;
+    z-index: 1003;
+    background-color: #000000;
+    border: 1px solid #ffffff;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.92);
+    padding: 14px;
+    width: 340px;
+    max-height: min(82vh, 720px);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    color: #ffffff;
+}
+
+.anim-popup::-webkit-scrollbar { width: 7px; }
+.anim-popup::-webkit-scrollbar-thumb { background: #555; border-radius: 8px; }
+
+.anim-popup-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.anim-cat-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+}
+
+.anim-cat-btn {
+    background: transparent;
+    color: #cccccc;
+    border: 1px solid #555555;
+    padding: 5px 4px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.anim-cat-btn:hover {
+    border-color: #ffffff;
+    color: #ffffff;
+}
+
+.anim-cat-btn.active {
+    background: #ffffff;
+    color: #000000;
+    border-color: #ffffff;
+    font-weight: 600;
+}
+
+.anim-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+}
+
+.anim-option-btn {
+    background: #0d0d0d;
+    color: #ffffff;
+    border: 1px solid #444444;
+    padding: 7px 8px;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.anim-option-btn:hover {
+    border-color: #38b6ff;
+    background: #1a1a1a;
+}
+
+.anim-option-btn.active {
+    border-color: #38b6ff;
+    background: rgba(56, 182, 255, 0.22);
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.anim-sub-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.anim-dir-group {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+}
+
+.anim-dir-btn {
+    background: transparent;
+    color: #ffffff;
+    border: 1px solid #666666;
+    padding: 4px 6px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.anim-dir-btn:hover {
+    border-color: #ffffff;
+}
+
+.anim-dir-btn.active {
+    background: #38b6ff;
+    color: #000000;
+    border-color: #38b6ff;
+    font-weight: 600;
+}
+
+.anim-speed-input {
+    width: 74px;
+    background: #000000;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 4px 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9rem;
+    text-align: right;
+    outline: none;
+}
+
+.anim-speed-input:focus {
+    border-color: #38b6ff;
+}
+
+
+/* --- Punto de Anclaje / Eje de Rotación y Aparición (Pivot) --- */
+.tf-pivot {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    margin: -9px 0 0 -9px;
+    border-radius: 50%;
+    border: 2px solid #ffd24d;
+    background: rgba(0, 0, 0, 0.72);
+    box-shadow: 0 0 0 1px #000000, 0 0 6px rgba(255, 210, 77, 0.85);
+    cursor: crosshair;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tf-pivot::before,
+.tf-pivot::after {
+    content: '';
+    position: absolute;
+    background: #ffd24d;
+    pointer-events: none;
+}
+
+.tf-pivot::before {
+    width: 10px;
+    height: 2px;
+}
+
+.tf-pivot::after {
+    width: 2px;
+    height: 10px;
+}
+
+.tf-pivot:hover {
+    background: #ffd24d;
+    transform: scale(1.15);
+}
+
+.tf-pivot:hover::before,
+.tf-pivot:hover::after {
+    background: #000000;
+}
+
+.anim-pivot-box {
+    background: #0b0b0b;
+    border: 1px solid #333333;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.anim-pivot-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: #cccccc;
+}
+
+.anim-pivot-inputs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.anim-pivot-num {
+    width: 58px;
+    background: #000000;
+    color: #ffffff;
+    border: 1px solid #666666;
+    padding: 3px 5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    text-align: right;
+    outline: none;
+}
+
+.anim-pivot-num:focus {
+    border-color: #ffd24d;
+}

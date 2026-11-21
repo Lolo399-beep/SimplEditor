@@ -7127,3 +7127,875 @@ showMainView = function(pushToHistory = true) {
     closeAudioConfigPopup();
     _origShowMainView(pushToHistory);
 };
+
+// =====================================================================
+//  SISTEMA DE ANIMACIONES PARA IMÁGENES Y TEXTOS (ESTILO POWERPOINT)
+//  - Clic derecho en una imagen o texto -> "Animaciones"
+//  - Categorías: Entrada, Salida y Énfasis + dirección (Izq/Der/Arriba/Abajo)
+//  - Velocidad de animación editable por escrito (segundos) + vista previa
+//  - Integrado directamente en renderComposite / drawClipLayer (funciona
+//    en vista previa, pantalla completa y exportación de video)
+// =====================================================================
+
+const ANIM_DEFAULTS = Object.freeze({
+    type: 'none',       // 'none' | 'fade_in' | 'manifest' | 'slide_in' | 'zoom_in' | 'bounce_in' | 'wheel_in' | 'fade_out' | 'slide_out' | 'zoom_out' | 'pulse' | 'float' | 'shake' | 'spin_loop'
+    direction: 'left',  // 'left' | 'right' | 'up' | 'down'
+    duration: 0.8       // Velocidad de animación en segundos (escrito por el usuario)
+});
+
+const ANIM_CATALOG = [
+    { id: 'none',      cat: 'none',     label: 'Sin animación',          hasDir: false },
+    // Entrada
+    { id: 'fade_in',   cat: 'entrada',  label: 'Aparecer (Fade In)',     hasDir: false },
+    { id: 'manifest',  cat: 'entrada',  label: 'Manifestarse',           hasDir: false },
+    { id: 'slide_in',  cat: 'entrada',  label: 'Desplazar desde',        hasDir: true  },
+    { id: 'zoom_in',   cat: 'entrada',  label: 'Zoom In (Crecer)',       hasDir: false },
+    { id: 'bounce_in', cat: 'entrada',  label: 'Rebote (Bounce)',        hasDir: false },
+    { id: 'wheel_in',  cat: 'entrada',  label: 'Rueda / Giro',           hasDir: false },
+    // Salida
+    { id: 'fade_out',  cat: 'salida',   label: 'Desvanecer (Fade Out)',  hasDir: false },
+    { id: 'slide_out', cat: 'salida',   label: 'Desplazar hacia',        hasDir: true  },
+    { id: 'zoom_out',  cat: 'salida',   label: 'Zoom Out (Encoger)',     hasDir: false },
+    // Énfasis
+    { id: 'pulse',     cat: 'enfasis',  label: 'Pulso / Latido',         hasDir: false },
+    { id: 'float',     cat: 'enfasis',  label: 'Flotar (Levitar)',       hasDir: false },
+    { id: 'shake',     cat: 'enfasis',  label: 'Temblor (Shake)',        hasDir: false },
+    { id: 'spin_loop', cat: 'enfasis',  label: 'Girar continuo',         hasDir: false }
+];
+
+const ANIM_LABELS_MAP = Object.fromEntries(ANIM_CATALOG.map(a => [a.id, a.label]));
+const DIR_LABELS_MAP = { left: 'Izq', right: 'Der', up: 'Arriba', down: 'Abajo' };
+
+function getClipAnimation(clip) {
+    const raw = (clip && clip.anim) ? clip.anim : {};
+    return {
+        ...ANIM_DEFAULTS,
+        ...raw
+    };
+}
+
+function getAnimCatalogItem(type) {
+    return ANIM_CATALOG.find(a => a.id === type) || ANIM_CATALOG[0];
+}
+
+// --- 1. Integrar "Animaciones" en los menús contextuales de Imagen y Texto ---
+(function patchClipAndTextMenusForAnim() {
+    if (clipMenu) {
+        const animItem = document.createElement('div');
+        animItem.className = 'context-menu-item';
+        animItem.dataset.action = 'animations';
+        animItem.textContent = 'Animaciones';
+        const ref = clipMenu.querySelector('[data-action="filter-popup"]') || clipMenu.firstElementChild;
+        clipMenu.insertBefore(animItem, ref);
+
+        clipMenu.addEventListener('click', (e) => {
+            const item = e.target.closest('.context-menu-item');
+            if (!item || !clipTarget || item.classList.contains('disabled')) return;
+            if (item.dataset.action === 'animations') {
+                openAnimPopup(clipTarget, item);
+            }
+        });
+    }
+
+    if (textMenu) {
+        const animItem = document.createElement('div');
+        animItem.className = 'context-menu-item';
+        animItem.dataset.action = 'animations';
+        animItem.textContent = 'Animaciones';
+        const ref = textMenu.querySelector('[data-action="filter-mode"]') || textMenu.firstElementChild;
+        textMenu.insertBefore(animItem, ref);
+
+        textMenu.addEventListener('click', (e) => {
+            const item = e.target.closest('.context-menu-item');
+            if (!item || !clipTarget || item.classList.contains('disabled')) return;
+            if (item.dataset.action === 'animations') {
+                openAnimPopup(clipTarget, item);
+            }
+        });
+    }
+})();
+
+// Mostrar "Animaciones" solo cuando el clip es imagen (en videos permanece oculto)
+const _origShowClipContextMenuAnim = showClipContextMenu;
+showClipContextMenu = function(x, y, clip) {
+    _origShowClipContextMenuAnim(x, y, clip);
+    const animItem = clipMenu.querySelector('[data-action="animations"]');
+    if (animItem) {
+        animItem.style.display = clip.type === 'image' ? 'block' : 'none';
+    }
+};
+
+// --- 2. Panel flotante de Animaciones (estilo PowerPoint) ---
+const animPopup = document.createElement('div');
+animPopup.className = 'anim-popup hidden';
+animPopup.innerHTML = `
+    <div class="anim-popup-header">
+        <div class="filter-section-title" style="margin:0;">Animaciones</div>
+        <button type="button" id="animPreviewBtn" class="audio-mini-btn" title="Reproducir animación desde el inicio del clip">▶ Vista previa</button>
+    </div>
+
+    <div class="anim-cat-tabs" id="animCatTabs">
+        <button type="button" class="anim-cat-btn active" data-cat="all">Todas</button>
+        <button type="button" class="anim-cat-btn" data-cat="entrada">Entrada</button>
+        <button type="button" class="anim-cat-btn" data-cat="salida">Salida</button>
+        <button type="button" class="anim-cat-btn" data-cat="enfasis">Énfasis</button>
+    </div>
+
+    <div class="anim-grid" id="animOptionsGrid"></div>
+
+    <div id="animDirectionRow" class="anim-sub-row hidden">
+        <span style="color:#cccccc; font-size:12px;">Dirección:</span>
+        <div class="anim-dir-group" id="animDirGroup">
+            <button type="button" class="anim-dir-btn" data-dir="left">Izq</button>
+            <button type="button" class="anim-dir-btn" data-dir="right">Der</button>
+            <button type="button" class="anim-dir-btn" data-dir="up">Arriba</button>
+            <button type="button" class="anim-dir-btn" data-dir="down">Abajo</button>
+        </div>
+    </div>
+
+    <div class="adjustment-divider" style="margin: 4px 0;"></div>
+
+    <div class="anim-sub-row">
+        <label for="animSpeedInput" style="color:#cccccc; font-size:12px;">Velocidad (segundos):</label>
+        <div style="display:flex; align-items:center; gap:6px;">
+            <input type="number" id="animSpeedInput" class="anim-speed-input" min="0.05" max="60" step="0.05" value="0.8">
+            <span style="color:#aaaaaa; font-size:12px;">s</span>
+        </div>
+    </div>
+`;
+document.body.appendChild(animPopup);
+
+const animCatTabs = document.getElementById('animCatTabs');
+const animOptionsGrid = document.getElementById('animOptionsGrid');
+const animDirectionRow = document.getElementById('animDirectionRow');
+const animDirGroup = document.getElementById('animDirGroup');
+const animSpeedInput = document.getElementById('animSpeedInput');
+const animPreviewBtn = document.getElementById('animPreviewBtn');
+
+let animTargetClip = null;
+let animBeforeState = '';
+let animActiveCat = 'all';
+
+function renderAnimGrid() {
+    if (!animTargetClip) return;
+    const current = getClipAnimation(animTargetClip);
+    const filtered = animActiveCat === 'all'
+        ? ANIM_CATALOG
+        : ANIM_CATALOG.filter(item => item.cat === 'none' || item.cat === animActiveCat);
+
+    animOptionsGrid.innerHTML = filtered.map(item => `
+        <button type="button" class="anim-option-btn ${current.type === item.id ? 'active' : ''}" data-anim-id="${item.id}">
+            ${item.label}
+        </button>
+    `).join('');
+
+    const meta = getAnimCatalogItem(current.type);
+    animDirectionRow.classList.toggle('hidden', !meta.hasDir);
+    animDirGroup.querySelectorAll('.anim-dir-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.dir === (current.direction || 'left'));
+    });
+
+    animCatTabs.querySelectorAll('.anim-cat-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.cat === animActiveCat);
+    });
+
+    animSpeedInput.value = current.duration;
+}
+
+function openAnimPopup(clip, anchorEl) {
+    if (!clip || clip.locked || (clip.type !== 'image' && clip.type !== 'text')) return;
+    closeFilterPopup();
+    closeTextPopup();
+    closeAudioConfigPopup();
+
+    animTargetClip = clip;
+    clip.anim = getClipAnimation(clip);
+    animBeforeState = JSON.stringify(clip.anim);
+    animActiveCat = 'all';
+
+    renderAnimGrid();
+
+    const r = anchorEl.getBoundingClientRect();
+    animPopup.classList.remove('hidden');
+    const w = animPopup.offsetWidth;
+    const h = animPopup.offsetHeight;
+    animPopup.style.left = `${Math.max(8, Math.min(r.right + 10, window.innerWidth - w - 8))}px`;
+    animPopup.style.top = `${Math.max(8, Math.min(r.top, window.innerHeight - h - 8))}px`;
+}
+
+function closeAnimPopup() {
+    if (animPopup.classList.contains('hidden')) return;
+    animPopup.classList.add('hidden');
+    if (animTargetClip) {
+        if (JSON.stringify(getClipAnimation(animTargetClip)) !== animBeforeState) {
+            commit();
+        }
+    }
+    animTargetClip = null;
+}
+
+document.addEventListener('pointerdown', (e) => {
+    if (!animPopup.classList.contains('hidden') &&
+        !animPopup.contains(e.target) &&
+        !e.target.closest('.context-menu')) {
+        closeAnimPopup();
+    }
+}, true);
+
+animPopup.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); closeAnimPopup(); }
+});
+
+animCatTabs.addEventListener('click', (e) => {
+    const btn = e.target.closest('.anim-cat-btn');
+    if (!btn) return;
+    animActiveCat = btn.dataset.cat;
+    renderAnimGrid();
+});
+
+animOptionsGrid.addEventListener('click', (e) => {
+    const btn = e.target.closest('.anim-option-btn');
+    if (!btn || !animTargetClip) return;
+    animTargetClip.anim = getClipAnimation(animTargetClip);
+    animTargetClip.anim.type = btn.dataset.animId;
+    renderAnimGrid();
+    updateClipBadge(animTargetClip);
+    requestRender();
+});
+
+animDirGroup.addEventListener('click', (e) => {
+    const btn = e.target.closest('.anim-dir-btn');
+    if (!btn || !animTargetClip) return;
+    animTargetClip.anim = getClipAnimation(animTargetClip);
+    animTargetClip.anim.direction = btn.dataset.dir;
+    renderAnimGrid();
+    updateClipBadge(animTargetClip);
+    requestRender();
+});
+
+animSpeedInput.addEventListener('input', () => {
+    if (!animTargetClip) return;
+    const val = parseFloat(String(animSpeedInput.value).replace(',', '.'));
+    if (isFinite(val) && val >= 0.05) {
+        animTargetClip.anim = getClipAnimation(animTargetClip);
+        animTargetClip.anim.duration = Math.min(60, Math.max(0.05, Math.round(val * 100) / 100));
+        updateClipBadge(animTargetClip);
+        requestRender();
+    }
+});
+
+animSpeedInput.addEventListener('blur', () => {
+    if (!animTargetClip) return;
+    animSpeedInput.value = getClipAnimation(animTargetClip).duration;
+});
+
+animPreviewBtn.addEventListener('click', () => {
+    if (!animTargetClip) return;
+    const anim = getClipAnimation(animTargetClip);
+    const meta = getAnimCatalogItem(anim.type);
+    pause();
+    if (meta.cat === 'salida') {
+        const dur = Math.min(clipDurationSafe(animTargetClip), anim.duration || 0.8);
+        clock.t = Math.max(animTargetClip.start, animTargetClip.start + animTargetClip.duration - dur - 0.05);
+    } else {
+        clock.t = animTargetClip.start;
+    }
+    updatePlayhead();
+    play();
+});
+
+function clipDurationSafe(clip) {
+    return Math.max(0.05, Number(clip && clip.duration) || 0.05);
+}
+
+// --- 3. Matemáticas de animación por fotograma (Entrada, Salida, Énfasis) ---
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+function easeInCubic(t) { return t * t * t; }
+function easeOutBounce(t) {
+    const n1 = 7.5625, d1 = 2.75;
+    if (t < 1 / d1) return n1 * t * t;
+    if (t < 2 / d1) return n1 * (t -= 1.5 / d1) * t + 0.75;
+    if (t < 2.5 / d1) return n1 * (t -= 2.25 / d1) * t + 0.9375;
+    return n1 * (t -= 2.625 / d1) * t + 0.984375;
+}
+
+function computeClipAnimState(clip, localT, canvasW, canvasH) {
+    const state = { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0, alpha: 1 };
+    if (!clip || (clip.type !== 'image' && clip.type !== 'text')) return state;
+
+    const anim = getClipAnimation(clip);
+    if (!anim || anim.type === 'none') return state;
+
+    const speed = Math.max(0.05, Number(anim.duration) || 0.8);
+    const clipDur = clipDurationSafe(clip);
+    const t = Math.max(0, Math.min(clipDur, localT));
+
+    switch (anim.type) {
+        // --- ENTRADAS ---
+        case 'fade_in': {
+            const p = Math.min(1, t / speed);
+            state.alpha = p;
+            break;
+        }
+        case 'manifest': {
+            // Manifestarse: aparición suave progresiva con ligera expansión (opuesto a desvanecer)
+            const p = easeOutCubic(Math.min(1, t / speed));
+            state.alpha = p;
+            const s = 0.92 + 0.08 * p;
+            state.sx = s;
+            state.sy = s;
+            break;
+        }
+        case 'slide_in': {
+            const p = easeOutCubic(Math.min(1, t / speed));
+            const rem = 1 - p;
+            if (anim.direction === 'left') state.dx = -canvasW * rem;
+            else if (anim.direction === 'right') state.dx = canvasW * rem;
+            else if (anim.direction === 'up') state.dy = -canvasH * rem;
+            else if (anim.direction === 'down') state.dy = canvasH * rem;
+            break;
+        }
+        case 'zoom_in': {
+            const p = easeOutCubic(Math.min(1, t / speed));
+            const s = Math.max(0.001, p);
+            state.sx = s;
+            state.sy = s;
+            state.alpha = Math.min(1, p * 1.4);
+            break;
+        }
+        case 'bounce_in': {
+            const p = easeOutBounce(Math.min(1, t / speed));
+            const s = Math.max(0.001, p);
+            state.sx = s;
+            state.sy = s;
+            state.alpha = Math.min(1, (t / speed) * 3);
+            break;
+        }
+        case 'wheel_in': {
+            const p = easeOutCubic(Math.min(1, t / speed));
+            const s = Math.max(0.001, p);
+            state.sx = s;
+            state.sy = s;
+            state.rot = -360 * (1 - p);
+            state.alpha = Math.min(1, p * 1.5);
+            break;
+        }
+
+        // --- SALIDAS ---
+        case 'fade_out': {
+            const effDur = Math.min(clipDur, speed);
+            const startOut = clipDur - effDur;
+            if (t > startOut) {
+                const p = Math.min(1, (t - startOut) / effDur);
+                state.alpha = 1 - p;
+            }
+            break;
+        }
+        case 'slide_out': {
+            const effDur = Math.min(clipDur, speed);
+            const startOut = clipDur - effDur;
+            if (t > startOut) {
+                const p = easeInCubic(Math.min(1, (t - startOut) / effDur));
+                if (anim.direction === 'left') state.dx = -canvasW * p;
+                else if (anim.direction === 'right') state.dx = canvasW * p;
+                else if (anim.direction === 'up') state.dy = -canvasH * p;
+                else if (anim.direction === 'down') state.dy = canvasH * p;
+            }
+            break;
+        }
+        case 'zoom_out': {
+            const effDur = Math.min(clipDur, speed);
+            const startOut = clipDur - effDur;
+            if (t > startOut) {
+                const p = easeInCubic(Math.min(1, (t - startOut) / effDur));
+                const s = Math.max(0.001, 1 - p);
+                state.sx = s;
+                state.sy = s;
+                state.alpha = 1 - p;
+            }
+            break;
+        }
+
+        // --- ÉNFASIS (en bucle usando "speed" como duración de cada ciclo) ---
+        case 'pulse': {
+            const phase = (t / speed) * Math.PI * 2;
+            const s = 1 + 0.12 * Math.sin(phase);
+            state.sx = s;
+            state.sy = s;
+            break;
+        }
+        case 'float': {
+            const phase = (t / speed) * Math.PI * 2;
+            state.dy = Math.sin(phase) * (canvasH * 0.04);
+            break;
+        }
+        case 'shake': {
+            const phase = (t / speed) * Math.PI * 8;
+            state.dx = Math.sin(phase) * (canvasW * 0.022);
+            state.rot = Math.sin(phase) * 3.5;
+            break;
+        }
+        case 'spin_loop': {
+            state.rot = ((t / speed) * 360) % 360;
+            break;
+        }
+    }
+
+    return state;
+}
+
+// --- 4. Integrar animación en el renderizado, serialización, duplicación y badges ---
+const _origDrawClipLayerAnim = drawClipLayer;
+drawClipLayer = function(ctx, clip, source, fit, canvasW, canvasH) {
+    if (!fit || !source) return;
+    const anim = getClipAnimation(clip);
+    if (!anim || anim.type === 'none') {
+        _origDrawClipLayerAnim(ctx, clip, source, fit, canvasW, canvasH);
+        return;
+    }
+
+    const localT = (typeof clip._previewLocalT === 'number')
+        ? clip._previewLocalT
+        : (clock.t - clip.start);
+
+    const st = computeClipAnimState(clip, localT, canvasW, canvasH);
+    if (st.alpha <= 0.001) return;
+
+    const baseTf = clip.tf || { x: 0, y: 0, r: 0, sx: 1, sy: 1 };
+    const tempTf = {
+        x: (baseTf.x || 0) + st.dx / canvasW,
+        y: (baseTf.y || 0) + st.dy / canvasH,
+        r: (baseTf.r || 0) + st.rot,
+        sx: (baseTf.sx ?? 1) * st.sx,
+        sy: (baseTf.sy ?? 1) * st.sy
+    };
+
+    const prevTf = clip.tf;
+    clip.tf = tempTf;
+    ctx.save();
+    ctx.globalAlpha *= Math.max(0, Math.min(1, st.alpha));
+    try {
+        _origDrawClipLayerAnim(ctx, clip, source, fit, canvasW, canvasH);
+    } finally {
+        ctx.restore();
+        clip.tf = prevTf;
+    }
+};
+
+// Etiqueta en el clip de la línea de tiempo
+const _origUpdateClipBadgeAnim = updateClipBadge;
+updateClipBadge = function(clip) {
+    _origUpdateClipBadgeAnim(clip);
+    if (!clip || (clip.type !== 'image' && clip.type !== 'text')) return;
+    const anim = getClipAnimation(clip);
+    if (anim && anim.type !== 'none') {
+        const meta = getAnimCatalogItem(anim.type);
+        const dirTxt = meta.hasDir ? ` (${DIR_LABELS_MAP[anim.direction] || 'Izq'})` : '';
+        const animLabel = `Anim: ${meta.label}${dirTxt} · ${anim.duration}s`;
+        clip.badge.textContent = clip.badge.textContent
+            ? `${clip.badge.textContent} · ${animLabel}`
+            : animLabel;
+    }
+};
+
+// Guardar y restaurar animaciones en Undo/Redo y proyectos
+const _origSerializeRowsAnim = serializeRows;
+serializeRows = function() {
+    const rows = _origSerializeRowsAnim();
+    Array.from(rowsContainer.children).forEach((rowEl, rIdx) => {
+        const clipEls = Array.from(rowEl.children).filter(el => el._clip);
+        clipEls.forEach((el, cIdx) => {
+            if (rows[rIdx] && rows[rIdx].clips[cIdx] && el._clip.anim) {
+                rows[rIdx].clips[cIdx].anim = { ...el._clip.anim };
+            }
+        });
+    });
+    return rows;
+};
+
+const _origBuildRowsAnim = buildRows;
+buildRows = function(rowsData, project) {
+    (rowsData || []).forEach(data => {
+        (data.clips || []).forEach(c => {
+            const clip = project.clips[c.id];
+            if (clip) {
+                clip.anim = c.anim ? { ...ANIM_DEFAULTS, ...c.anim } : null;
+            }
+        });
+    });
+    _origBuildRowsAnim(rowsData, project);
+};
+
+// Conservar la animación al cortar o duplicar un clip
+const _origCreateFragmentClipAnim = createFragmentClip;
+createFragmentClip = function(parent, video) {
+    const frag = _origCreateFragmentClipAnim(parent, video);
+    if (parent && parent.anim) frag.anim = { ...parent.anim };
+    return frag;
+};
+
+const _origDuplicateClipToNewRowAnim = duplicateClipToNewRow;
+duplicateClipToNewRow = function(clip) {
+    _origDuplicateClipToNewRowAnim(clip);
+    if (clip && clip.anim && currentProjectId) {
+        const topRow = rowsContainer.firstElementChild;
+        const lastEl = topRow && topRow.lastElementChild;
+        if (lastEl && lastEl._clip) {
+            lastEl._clip.anim = { ...clip.anim };
+            updateClipBadge(lastEl._clip);
+            refreshPreview();
+        }
+    }
+};
+
+
+// =====================================================================
+//  PUNTO DE EJE (ANCLAJE / PIVOTE) PARA ROTACIÓN Y APARICIÓN
+//  - Cada clip de imagen o texto tiene un punto de eje normalizado (px, py)
+//    donde (0.5, 0.5) es el centro de la capa y cualquier coordenada
+//    (por ejemplo en el centro de la bola de Gyro Zeppeli) define:
+//      1. El eje sobre el que gira (Girar continuo, Rueda/Giro, Temblor, rotación manual).
+//      2. El punto desde donde crece/aparece o se encoge (Zoom In, Zoom Out,
+//         Rebote, Pulso, Manifestarse).
+//  - Cómo moverlo:
+//      a) En Pantalla Completa: arrastra la mira amarilla (⊕) directamente
+//         encima de la bola o el punto exacto donde quieras el eje.
+//      b) En el panel "Animaciones": ajusta X% / Y%, usa "Auto-centrar en recorte"
+//         (detecta automáticamente el centro de los píxeles visibles si recortaste
+//         la bola de Gyro) o "Centrar (50%)".
+// =====================================================================
+
+// Detecta el centroide de los píxeles visibles (alfa > 20) de una imagen recortada o texto
+function detectVisibleCenterNorm(clip) {
+    if (!clip) return { px: 0.5, py: 0.5 };
+    let src = null;
+    if (clip.type === 'image') src = getImageDrawable(clip);
+    else if (clip.type === 'text') src = textSurface(clip);
+    if (!src) return { px: 0.5, py: 0.5 };
+
+    const sw = src.naturalWidth || src.width || 0;
+    const sh = src.naturalHeight || src.height || 0;
+    if (!sw || !sh) return { px: 0.5, py: 0.5 };
+
+    const probeW = Math.min(256, sw);
+    const probeH = Math.min(256, sh);
+    const cv = document.createElement('canvas');
+    cv.width = probeW;
+    cv.height = probeH;
+    const c = cv.getContext('2d', { willReadFrequently: true });
+    c.drawImage(src, 0, 0, probeW, probeH);
+
+    let data;
+    try {
+        data = c.getImageData(0, 0, probeW, probeH).data;
+    } catch (e) {
+        return { px: 0.5, py: 0.5 };
+    }
+
+    let minX = probeW, minY = probeH, maxX = -1, maxY = -1;
+    for (let y = 0; y < probeH; y++) {
+        for (let x = 0; x < probeW; x++) {
+            const a = data[(y * probeW + x) * 4 + 3];
+            if (a > 20) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) return { px: 0.5, py: 0.5 };
+    return {
+        px: Math.round((((minX + maxX + 1) / 2) / probeW) * 1000) / 1000,
+        py: Math.round((((minY + maxY + 1) / 2) / probeH) * 1000) / 1000
+    };
+}
+
+function getClipPivot(clip) {
+    const t = clip && clip.tf;
+    return {
+        px: (t && typeof t.px === 'number' && isFinite(t.px)) ? t.px : 0.5,
+        py: (t && typeof t.py === 'number' && isFinite(t.py)) ? t.py : 0.5
+    };
+}
+
+// Al aceptar un recorte manual de imagen, calcular automáticamente el eje en el centro
+// del área recortada (así al recortar la bola de Gyro Zeppeli ya gira sobre su propio eje).
+const _origCropAcceptClick = cropAcceptBtn.onclick;
+cropAcceptBtn.addEventListener('click', () => {
+    // Se ejecuta justo después del listener original que actualiza cropTargetClip.croppedCanvas
+    setTimeout(() => {
+        const clip = cropTargetClip || selectedClip;
+        if (!clip || clip.type !== 'image' || !clip.croppedCanvas) return;
+        const center = detectVisibleCenterNorm(clip);
+        if (!clip.tf) clip.tf = { x: 0, y: 0, sx: 1, sy: 1, r: 0, px: center.px, py: center.py };
+        else {
+            clip.tf.px = center.px;
+            clip.tf.py = center.py;
+        }
+        commit();
+        refreshPreview();
+    }, 0);
+});
+
+// --- 1. Mira interactiva del punto de eje en Pantalla Completa ---
+const tfPivot = document.createElement('div');
+tfPivot.className = 'tf-pivot';
+tfPivot.title = 'Arrastra para mover el eje de rotación y aparición';
+tfBox.appendChild(tfPivot);
+
+const _origUpdateTransformOverlay = updateTransformOverlay;
+updateTransformOverlay = function() {
+    _origUpdateTransformOverlay();
+    if (tfBox.style.display === 'none' || !selectedClip) return;
+    const { px, py } = getClipPivot(selectedClip);
+    tfPivot.style.left = `${px * 100}%`;
+    tfPivot.style.top = `${py * 100}%`;
+};
+
+// Interceptar el arrastre sobre tfPivot en pantalla completa antes de que tfLayer mueva la caja
+tfPivot.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || exporting || trimMode || filterMode || trimBusy || !currentProjectId) return;
+    if (!isClipEditable(selectedClip)) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const clip = selectedClip;
+    const g = clipGeometry(clip);
+    if (!g) return;
+
+    const before = clip.tf ? { ...clip.tf } : null;
+    if (!clip.tf) clip.tf = { ...TF_IDENTITY, px: 0.5, py: 0.5 };
+    if (typeof clip.tf.px !== 'number') clip.tf.px = 0.5;
+    if (typeof clip.tf.py !== 'number') clip.tf.py = 0.5;
+
+    const cos = Math.cos(g.rad);
+    const sin = Math.sin(g.rad);
+    const w = g.hw * 2;
+    const h = g.hh * 2;
+
+    const onPivotMove = (ev) => {
+        const m = previewMetrics();
+        const cxCanvas = (ev.clientX - m.left) / m.k;
+        const cyCanvas = (ev.clientY - m.top) / m.k;
+
+        // Convertir coordenadas del lienzo al espacio local sin rotación de la caja
+        const dx = cxCanvas - g.cx;
+        const dy = cyCanvas - g.cy;
+        const lx = dx * cos + dy * sin;
+        const ly = -dx * sin + dy * cos;
+
+        // Permitir colocar el eje dentro o incluso fuera de la capa (para órbitas)
+        const newPx = Math.max(-1, Math.min(2, 0.5 + lx / Math.max(1, w)));
+        const newPy = Math.max(-1, Math.min(2, 0.5 + ly / Math.max(1, h)));
+
+        clip.tf.px = Math.round(newPx * 1000) / 1000;
+        clip.tf.py = Math.round(newPy * 1000) / 1000;
+
+        updateTransformOverlay();
+        if (!animPopup.classList.contains('hidden') && animTargetClip === clip) {
+            syncAnimPivotInputs();
+        }
+        requestRender();
+    };
+
+    const onPivotUp = () => {
+        window.removeEventListener('pointermove', onPivotMove);
+        window.removeEventListener('pointerup', onPivotUp);
+        window.removeEventListener('pointercancel', onPivotUp);
+        if (!hasTransform(clip.tf)) clip.tf = null;
+        if (JSON.stringify(clip.tf) !== JSON.stringify(before)) commit();
+        refreshPreview();
+    };
+
+    window.addEventListener('pointermove', onPivotMove);
+    window.addEventListener('pointerup', onPivotUp);
+    window.addEventListener('pointercancel', onPivotUp);
+});
+
+// Doble clic en la mira amarilla -> devuelve el eje al centro (50%, 50%)
+tfPivot.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isClipEditable(selectedClip) || !selectedClip.tf) return;
+    selectedClip.tf.px = 0.5;
+    selectedClip.tf.py = 0.5;
+    if (!hasTransform(selectedClip.tf)) selectedClip.tf = null;
+    commit();
+    refreshPreview();
+});
+
+// Actualizar hasTransform para tener en cuenta si el eje fue desplazado del centro (0.5, 0.5)
+const _origHasTransform = hasTransform;
+hasTransform = function(t) {
+    if (!t) return false;
+    const px = typeof t.px === 'number' ? t.px : 0.5;
+    const py = typeof t.py === 'number' ? t.py : 0.5;
+    return _origHasTransform(t) || Math.abs(px - 0.5) > 0.0005 || Math.abs(py - 0.5) > 0.0005;
+};
+
+// --- 2. Compositor con punto de eje (pivote) exacto ---
+// Tanto la rotación/escala manual como TODAS las animaciones (Girar continuo,
+// Rueda/Giro, Zoom In, Zoom Out, Rebote, Pulso, Temblor, Manifestarse)
+// giran y escalan alrededor de (px, py) manteniendo ese punto fijo en pantalla.
+drawClipLayer = function(ctx, clip, source, fit, canvasW, canvasH) {
+    if (!fit || !source) return;
+    const { x, y, w, h } = fit;
+    const anim = getClipAnimation(clip);
+    const hasAnim = anim && anim.type !== 'none';
+
+    const localT = (typeof clip._previewLocalT === 'number')
+        ? clip._previewLocalT
+        : (clock.t - clip.start);
+
+    const st = hasAnim
+        ? computeClipAnimState(clip, localT, canvasW, canvasH)
+        : { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0, alpha: 1 };
+
+    if (st.alpha <= 0.001) return;
+
+    const baseTf = clip.tf || { x: 0, y: 0, r: 0, sx: 1, sy: 1, px: 0.5, py: 0.5 };
+    const px = (typeof baseTf.px === 'number' && isFinite(baseTf.px)) ? baseTf.px : 0.5;
+    const py = (typeof baseTf.py === 'number' && isFinite(baseTf.py)) ? baseTf.py : 0.5;
+
+    const totalRot = (baseTf.r || 0) + st.rot;
+    const totalSx = (baseTf.sx ?? 1) * st.sx;
+    const totalSy = (baseTf.sy ?? 1) * st.sy;
+    const totalDx = (baseTf.x || 0) * canvasW + st.dx;
+    const totalDy = (baseTf.y || 0) * canvasH + st.dy;
+
+    const moved = Math.abs(totalDx) > 0.001 || Math.abs(totalDy) > 0.001 ||
+                  Math.abs(totalRot) > 0.001 || Math.abs(totalSx - 1) > 0.0001 ||
+                  Math.abs(totalSy - 1) > 0.0001;
+    const keyed = clip.chroma !== 'none';
+
+    if (filterLayerCanvas.width !== canvasW || filterLayerCanvas.height !== canvasH) {
+        filterLayerCanvas.width = canvasW;
+        filterLayerCanvas.height = canvasH;
+        filterLayerCtx = filterLayerCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    filterLayerCtx.clearRect(0, 0, canvasW, canvasH);
+
+    let layerSource = source;
+    if (keyed) {
+        sctx.clearRect(0, 0, canvasW, canvasH);
+        sctx.drawImage(source, x, y, w, h);
+        applyChromaKey(sctx, x, y, w, h, clip.chroma);
+        layerSource = scratch;
+    }
+
+    if (!moved) {
+        if (keyed) filterLayerCtx.drawImage(layerSource, 0, 0, canvasW, canvasH);
+        else filterLayerCtx.drawImage(layerSource, x, y, w, h);
+    } else {
+        // Desplazamiento desde el centro de la caja hasta el punto de eje elegido (px, py)
+        const offX = (px - 0.5) * w;
+        const offY = (py - 0.5) * h;
+        const centerX = x + w / 2 + totalDx;
+        const centerY = y + h / 2 + totalDy;
+
+        filterLayerCtx.save();
+        // Trasladamos al punto de eje en pantalla, rotamos/escalamos ahí, y volvemos (-offX, -offY)
+        filterLayerCtx.translate(centerX + offX, centerY + offY);
+        filterLayerCtx.rotate(totalRot * Math.PI / 180);
+        filterLayerCtx.scale(totalSx, totalSy);
+        filterLayerCtx.translate(-offX, -offY);
+
+        if (keyed) filterLayerCtx.drawImage(layerSource, x, y, w, h, -w / 2, -h / 2, w, h);
+        else filterLayerCtx.drawImage(layerSource, -w / 2, -h / 2, w, h);
+        filterLayerCtx.restore();
+    }
+
+    applyVideoFilters(filterLayerCtx, clip, fit, canvasW, canvasH);
+    applyClipAdjustments(filterLayerCtx, clip, fit, canvasW, canvasH);
+
+    ctx.save();
+    ctx.globalAlpha *= Math.max(0, Math.min(1, st.alpha));
+    ctx.drawImage(filterLayerCanvas, 0, 0);
+    ctx.restore();
+};
+
+// --- 3. Controles de Punto de Eje dentro del panel "Animaciones" ---
+(function addPivotControlsToAnimPopup() {
+    const pivotBox = document.createElement('div');
+    pivotBox.className = 'anim-pivot-box';
+    pivotBox.innerHTML = `
+        <div class="anim-pivot-row">
+            <span>Eje de rotación / aparición:</span>
+            <div class="anim-pivot-inputs">
+                <label>X <input type="number" id="animPivotXInput" class="anim-pivot-num" min="-100" max="200" step="1" value="50">%</label>
+                <label>Y <input type="number" id="animPivotYInput" class="anim-pivot-num" min="-100" max="200" step="1" value="50">%</label>
+            </div>
+        </div>
+        <div class="anim-pivot-row" style="justify-content:flex-end; gap:6px;">
+            <button type="button" id="animAutoPivotBtn" class="audio-mini-btn" title="Detecta el centro del objeto recortado (ej. la bola de Gyro)">Auto-detectar centro</button>
+            <button type="button" id="animCenterPivotBtn" class="audio-mini-btn" title="Volver al centro exacto (50%, 50%)">Centrar (50%)</button>
+        </div>
+        <div style="font-size:11px; color:#999999; line-height:1.3;">
+            Tip: en pantalla completa también podés arrastrar la mira amarilla ⊕ directo sobre la imagen.
+        </div>
+    `;
+    animPopup.appendChild(pivotBox);
+
+    const pivotXInput = document.getElementById('animPivotXInput');
+    const pivotYInput = document.getElementById('animPivotYInput');
+    const autoPivotBtn = document.getElementById('animAutoPivotBtn');
+    const centerPivotBtn = document.getElementById('animCenterPivotBtn');
+
+    window.syncAnimPivotInputs = function() {
+        if (!animTargetClip) return;
+        const { px, py } = getClipPivot(animTargetClip);
+        pivotXInput.value = Math.round(px * 1000) / 10;
+        pivotYInput.value = Math.round(py * 1000) / 10;
+    };
+
+    const applyPivotFromInputs = () => {
+        if (!animTargetClip) return;
+        const vx = parseFloat(String(pivotXInput.value).replace(',', '.'));
+        const vy = parseFloat(String(pivotYInput.value).replace(',', '.'));
+        if (!animTargetClip.tf) animTargetClip.tf = { ...TF_IDENTITY, px: 0.5, py: 0.5 };
+        if (isFinite(vx)) animTargetClip.tf.px = Math.max(-1, Math.min(2, vx / 100));
+        if (isFinite(vy)) animTargetClip.tf.py = Math.max(-1, Math.min(2, vy / 100));
+        updateTransformOverlay();
+        requestRender();
+    };
+
+    pivotXInput.addEventListener('input', applyPivotFromInputs);
+    pivotYInput.addEventListener('input', applyPivotFromInputs);
+
+    autoPivotBtn.addEventListener('click', () => {
+        if (!animTargetClip) return;
+        const c = detectVisibleCenterNorm(animTargetClip);
+        if (!animTargetClip.tf) animTargetClip.tf = { ...TF_IDENTITY, px: c.px, py: c.py };
+        else {
+            animTargetClip.tf.px = c.px;
+            animTargetClip.tf.py = c.py;
+        }
+        syncAnimPivotInputs();
+        updateTransformOverlay();
+        commit();
+        requestRender();
+    });
+
+    centerPivotBtn.addEventListener('click', () => {
+        if (!animTargetClip) return;
+        if (!animTargetClip.tf) animTargetClip.tf = { ...TF_IDENTITY, px: 0.5, py: 0.5 };
+        else {
+            animTargetClip.tf.px = 0.5;
+            animTargetClip.tf.py = 0.5;
+        }
+        if (!hasTransform(animTargetClip.tf)) animTargetClip.tf = null;
+        syncAnimPivotInputs();
+        updateTransformOverlay();
+        commit();
+        requestRender();
+    });
+})();
+
+const _origOpenAnimPopup = openAnimPopup;
+openAnimPopup = function(clip, anchorEl) {
+    _origOpenAnimPopup(clip, anchorEl);
+    if (window.syncAnimPivotInputs) window.syncAnimPivotInputs();
+};
