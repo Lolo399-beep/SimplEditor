@@ -1,6 +1,6 @@
-[# SimplEditor](https://lolo399-beep.github.io/SimplEditor/)
+# SimplEditor
 Proyecto del 4to bimestre
-
+[Probar proyecto](https://lolo399-beep.github.io/SimplEditor/)
 
 [CARPETA DE CAMPO](https://docs.google.com/document/d/1GYxt_324ZdUJXEIp1LmLC7Gl5KIWkO6hZCsB-0-O1-8/edit?tab=t.0)
 
