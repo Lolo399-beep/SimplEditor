@@ -1,14 +1,32 @@
+/* ==========================================================================
+   ARCHIVO: styles.css
+   PROPÓSITO: Define toda la identidad visual minimalista en modo oscuro
+              (negro puro #000000 y bordes blancos #ffffff) de la aplicación.
+   ORGANIZACIÓN:
+     1. Variables globales (:root) y reseteo de caja (*).
+     2. Galería principal de proyectos (.grid, .project-card, .project-box).
+     3. Cabecera del editor y vista previa (.sticky-top, .video-player-container).
+     4. Controles de pantalla completa estilo YouTube (.fs-seek, .is-fullscreen).
+     5. Línea de tiempo multipista, regla y clips (.timeline, .ruler, .row-item, .clip).
+     6. Menús contextuales, paneles flotantes (Color, Audio, Texto, Animaciones).
+     7. Modales de exportación y recorte manual tipo pluma (.quality-modal, .manual-crop-modal).
+     8. Herramientas de transformación de capas y punto de pivote (.tf-layer, .tf-box, .tf-pivot).
+   ========================================================================== */
+
+/* Reseteo universal: asegura que el padding y los bordes no aumenten el tamaño calculado de los elementos */
 * {
     box-sizing: border-box;
     margin: 0;
     padding: 0;
 }
 
+/* Variables CSS globales reutilizadas en todo el diseño y actualizadas dinámicamente desde main.js */
 :root {
     --page-pad: 60px;                                    /* Margen de la página */
     --view-w: calc(100vw - 2 * var(--page-pad));         /* Ancho visible (main.js lo ajusta con exactitud) */
 }
 
+/* Estilo base del documento: fondo negro puro, texto blanco y tipografía nativa del sistema */
 body {
     background-color: #000000;
     color: #ffffff;
@@ -16,6 +34,7 @@ body {
     padding: var(--page-pad);
 }
 
+/* Título principal de la pantalla de inicio ('Proyectos') */
 h1 {
     font-size: 2.5rem;
     margin-bottom: 40px;
@@ -23,18 +42,21 @@ h1 {
     letter-spacing: -0.5px;
 }
 
+/* Cuadrícula de 6 columnas fijas para mostrar las tarjetas de proyectos en el menú principal */
 .grid {
     display: grid;
     grid-template-columns: repeat(6, 220px);
     gap: 40px;
 }
 
+/* Contenedor vertical que agrupa la caja visual del proyecto y su campo de nombre debajo */
 .project-card {
     display: flex;
     flex-direction: column;
     align-items: center;
 }
 
+/* Recuadro interactivo de cada proyecto (220x130px); se invierte a blanco al pasar el cursor */
 .project-box {
     width: 220px;
     height: 130px;
@@ -53,12 +75,14 @@ h1 {
     color: #000000;
 }
 
+/* Símbolo '+' centrado dentro de la tarjeta 'Nuevo proyecto' */
 .plus-sign {
     font-size: 3rem;
     font-weight: 300;
     line-height: 1;
 }
 
+/* Campo de texto editable debajo de cada tarjeta para renombrar el proyecto directamente */
 .project-name {
     margin-top: 12px;
     color: #ffffff;
@@ -100,6 +124,7 @@ h1 {
 }
 
 /* Header del menú exclusivo del proyecto */
+/* Barra superior dentro del editor: botón Volver, título del proyecto y controles Undo/Redo */
 .project-header {
     display: flex;
     align-items: center;
@@ -115,6 +140,7 @@ h1 {
 }
 
 /* Botón Volver */
+/* Botón minimalista para regresar a la galería de proyectos */
 .back-btn {
     background-color: transparent;
     color: #ffffff;
@@ -132,6 +158,7 @@ h1 {
 }
 
 /* Historial (Undo/Redo) */
+/* Agrupador visual para los botones de Deshacer (↶) y Rehacer (↷) */
 .history-controls {
     display: flex;
     gap: 4px;
@@ -163,6 +190,7 @@ h1 {
 }
 
 /* Botones de Reproducción */
+/* Fila de botones de reproducción (Play, Pausa, Reiniciar, Velocidad y Reloj) */
 .media-controls {
     display: flex;
     align-items: center;
@@ -197,6 +225,7 @@ h1 {
 }
 
 /* --- Velocidad de reproducción (multiplicador) --- */
+/* Botón que muestra el multiplicador de velocidad actual (ej. x1.0) */
 .speed-btn {
     background: transparent;
     border: none;
@@ -232,6 +261,7 @@ h1 {
 }
 
 /* --- Contenedor de la vista previa --- */
+/* Marco del reproductor de vista previa; cambia su aspect-ratio según el formato elegido (16:9, 9:16, etc.) */
 .video-player-container {
     position: relative;
     width: 320px;
@@ -252,6 +282,7 @@ h1 {
 }
 
 /* Superposición de botones de control (Volumen y Fullscreen) */
+/* Capa superpuesta en la parte inferior del reproductor con controles de volumen y pantalla completa */
 .video-controls-overlay {
     position: absolute;
     bottom: 8px;
@@ -304,6 +335,7 @@ h1 {
     pointer-events: auto;
 }
 
+/* Barra deslizante personalizada para ajustar el volumen maestro del editor */
 .volume-slider {
     -webkit-appearance: none;
     appearance: none;
@@ -377,6 +409,7 @@ h1 {
 }
 
 /* Barra para ir a un momento exacto */
+/* Barra de búsqueda temporal (scrubbing) exclusiva del modo pantalla completa */
 .fs-seek {
     position: relative;
     height: 22px;
@@ -460,6 +493,7 @@ h1 {
 }
 
 /* --- Sección de la línea de tiempo --- */
+/* Contenedor flex que alinea el botón '+ Nueva fila' a la izquierda y la línea de tiempo a la derecha */
 .project-workspace {
     display: flex;
     align-items: flex-start;
@@ -490,12 +524,14 @@ h1 {
     gap: 15px;
 }
 
+/* Contenedor relativo que envuelve la regla superior, las filas de clips y el cabezal rojo */
 .timeline {
     position: relative;
     width: fit-content;
 }
 
 /* Regla de tiempo */
+/* Regla superior de tiempo donde cada marca representa 1 segundo (40px por segundo) */
 .ruler {
     position: relative;
     height: 24px;
@@ -531,6 +567,7 @@ h1 {
 }
 
 /* Cabezal de reproducción */
+/* Línea vertical roja de 2px que indica el segundo exacto que se está visualizando */
 .playhead {
     position: absolute;
     top: 0;
@@ -543,12 +580,14 @@ h1 {
     z-index: 30;
 }
 
+/* Apila verticalmente todas las pistas (filas) del proyecto; la fila superior tiene mayor jerarquía visual */
 .rows-container {
     display: flex;
     flex-direction: column;
     position: relative;
 }
 
+/* Cada pista individual de la línea de tiempo (64px de alto) donde se colocan videos, imágenes, textos o audios */
 .row-item {
     height: 64px;
     border: 1px solid #ffffff;
@@ -574,6 +613,7 @@ h1 {
 }
 
 /* Agarradera para cambiar el orden (jerarquía) de las filas */
+/* Agarradera lateral izquierda (⋮⋮) para arrastrar y reordenar la jerarquía de las pistas */
 .row-grip {
     position: absolute;
     left: -28px;
@@ -598,6 +638,7 @@ h1 {
 }
 
 /* Manillas en los bordes para redimensionar la línea de tiempo */
+/* Bordes laterales invisibles de 8px para estirar o acortar la duración total de la línea de tiempo */
 .row-handle {
     position: absolute;
     top: 0;
@@ -616,6 +657,7 @@ h1 {
 }
 
 /* --- Clips (videos dentro de las filas) --- */
+/* Bloque rectangular que representa un fragmento multimedia dentro de una pista */
 .clip {
     position: absolute;
     top: 1px;
@@ -653,6 +695,7 @@ h1 {
     border-color: #ff4d4d;
 }
 
+/* Etiqueta inferior izquierda del clip con el nombre del archivo o el texto contenido */
 .clip-label {
     position: absolute;
     left: 0;
@@ -668,6 +711,7 @@ h1 {
     pointer-events: none;
 }
 
+/* Etiqueta superior derecha del clip que muestra estados activos (Pantalla verde, Filtro, Silenciado, Animación, etc.) */
 .clip-badge {
     position: absolute;
     top: 0;
@@ -696,6 +740,7 @@ h1 {
 }
 
 /* Menú contextual flotante */
+/* Menú flotante personalizado que aparece al hacer clic derecho sobre proyectos, filas o clips */
 .context-menu {
     position: fixed;
     background-color: #000000;
@@ -746,6 +791,7 @@ h1 {
 }
 
 /* Botones genéricos con borde blanco estilo minimalista */
+/* Botones principales inferiores ('Importar', 'Insertar texto', 'Exportar') */
 .action-btn {
     background-color: transparent;
     color: #ffffff;
@@ -775,6 +821,7 @@ h1 {
     z-index: 20;
 }
 
+/* Botón de tres puntos (⋮) en la esquina superior izquierda del reproductor para cambiar el formato de pantalla */
 .aspect-menu-btn {
     background: rgba(0, 0, 0, 0.7);
     border: 1px solid #ffffff;
@@ -918,6 +965,7 @@ h1 {
 /* --- Modo recortes --- */
 
 /* Cuadro de selección que se arrastra sobre la línea de tiempo */
+/* Rectángulo rojo semitransparente que dibuja el usuario al arrastrar en 'Modo recortes' */
 .trim-selection {
     position: absolute;
     display: none;
@@ -978,6 +1026,7 @@ body.trim-mode .ruler {
 
 
 /* Clips de imagen en la línea de tiempo */
+/* Estilo distintivo con borde celeste (#8ad7ff) para clips de imagen estática */
 .clip.image-clip {
     background-color: #202020;
     border-color: #8ad7ff;
@@ -995,6 +1044,7 @@ body.trim-mode .ruler {
 .image-resize-handle:hover { background: #8ad7ff; }
 
 /* --- Clips de audio (oscilogramas) --- */
+/* Estilo para clips de audio con oscilograma en color personalizable (por defecto verde agua #02f7c2) */
 .clip.audio-clip {
     background-color: #0b0b0b;
 }
@@ -1037,6 +1087,7 @@ body.trim-mode .ruler {
 }
 
 /* Capa transparente sobre la vista previa; recibe los clics para elegir y arrastrar capas */
+/* Capa interactiva transparente sobre el video en pantalla completa para seleccionar y mover capas */
 .tf-layer {
     position: absolute;
     top: 0;
@@ -1054,6 +1105,7 @@ body.trim-mode .ruler {
 }
 
 /* Caja de selección (gira junto con la capa) */
+/* Caja delimitadora punteada azul que rodea la capa seleccionada en pantalla completa */
 .tf-box {
     position: absolute;
     display: none;
@@ -1062,6 +1114,7 @@ body.trim-mode .ruler {
     cursor: move;
 }
 
+/* Cada uno de los 8 nodos circulares para escalar o estirar la capa seleccionada */
 .tf-handle {
     position: absolute;
     width: 14px;
@@ -1078,6 +1131,7 @@ body.trim-mode .ruler {
 }
 
 /* Manilla de giro, arriba a la derecha (fuera de la caja) */
+/* Manilla superior derecha (↻) para rotar libremente la capa seleccionada */
 .tf-rotate {
     position: absolute;
     top: -34px;
@@ -1102,6 +1156,7 @@ body.trim-mode .ruler {
 }
 
 /* --- Medidor de volumen de cada clip --- */
+/* Ventana emergente pequeña para ajustar el volumen individual de un clip (0% a 100%) */
 .volume-popup {
     position: fixed;
     display: none;
@@ -1146,6 +1201,7 @@ body.trim-mode .ruler {
     margin-bottom: 0;
 }
 
+/* Contenedor de la barra de búsqueda y su lista desplegable en la vista principal */
 .search-container {
     position: relative;
     width: 250px;
@@ -1227,6 +1283,7 @@ body.trim-mode .ruler {
     user-select: none;
 }
 /* --- Ventana / Pop-up de Filtros (Estilo Conceptual) --- */
+/* Panel flotante 'Color' con filtros preestablecidos y deslizadores de luz, color, detalle y HSL */
 .filter-popup {
     position: fixed;
     z-index: 1002;
@@ -1282,6 +1339,7 @@ body.trim-mode .ruler {
 
 
 /* --- Textos --- */
+/* Estilo distintivo con borde amarillo (#ffd24d) para clips de texto */
 .clip.text-clip {
     background-color: #4a4a4a;
     border-color: #ffd24d;
@@ -1290,6 +1348,7 @@ body.trim-mode .ruler {
 .clip.text-clip .clip-badge { color: #ffd24d; }
 
 /* Cartel para editar el texto (se abre con doble clic en el texto o clic derecho > Editar texto...) */
+/* Panel emergente para editar el contenido, tipografía, tamaño, color y resaltado de un texto */
 .text-popup {
     position: fixed;
     z-index: 1002;
@@ -1414,6 +1473,7 @@ body.trim-mode .ruler {
 .filter-popup::-webkit-scrollbar-thumb { background: #555; border-radius: 8px; }
 
 /* --- Modal de selección de calidad de exportación --- */
+/* Fondo oscuro modal para seleccionar la calidad de exportación (144p - 1080p) */
 .quality-modal {
     position: fixed;
     top: 0;
@@ -1499,6 +1559,7 @@ body.trim-mode .ruler {
 }
 
 /* --- Modal de Recorte Manual (Pluma / Lazo Poligonal) --- */
+/* Editor modal a pantalla completa para recortar imágenes punto por punto (lazo poligonal / pluma) */
 .manual-crop-modal {
     position: fixed;
     inset: 0;
@@ -1632,6 +1693,7 @@ body.trim-mode .ruler {
 }
 
 /* --- Modo filtros (por región / tramo en la línea de tiempo) --- */
+/* Cuadro de selección azul celeste usado en 'Modo color' para aislar y filtrar un tramo de tiempo */
 .filter-selection {
     position: absolute;
     display: none;
@@ -1689,6 +1751,7 @@ body.filter-mode .ruler {
 }
 
 /* --- Panel de Configuración de Audio (estilo Color) & Zona de Audio --- */
+/* Panel flotante avanzado 'Configurar' para clips de audio (EQ, compresor, reverb, delay, fades, pitch) */
 .audio-popup {
     position: fixed;
     z-index: 1002;
@@ -1769,6 +1832,7 @@ body.filter-mode .ruler {
 }
 
 /* Modo Zona de Audio (análogo a Modo color) */
+/* Cuadro de selección verde agua usado en 'Zona de audio' para aislar y configurar un tramo de sonido */
 .audio-zone-selection {
     position: absolute;
     display: none;
@@ -1826,6 +1890,7 @@ body.audio-zone-mode .ruler {
 }
 
 /* --- Panel de Animaciones (estilo PowerPoint) --- */
+/* Panel flotante 'Animaciones' estilo PowerPoint (Entrada, Salida, Énfasis, dirección y velocidad) */
 .anim-popup {
     position: fixed;
     z-index: 1003;
@@ -1962,6 +2027,7 @@ body.audio-zone-mode .ruler {
 
 
 /* --- Punto de Anclaje / Eje de Rotación y Aparición (Pivot) --- */
+/* Mira amarilla (⊕) en pantalla completa que representa el punto de anclaje / eje de rotación y escala */
 .tf-pivot {
     position: absolute;
     width: 18px;

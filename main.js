@@ -1,3 +1,26 @@
+/* ==========================================================================
+   ARCHIVO: main.js
+   PROPÓSITO: Motor completo del editor de video no lineal (NLE) en el navegador.
+   FUNCIONALIDADES PRINCIPALES:
+     1. Gestión de proyectos (crear, renombrar, buscar, miniatura, borrar).
+     2. Historial completo de Deshacer / Rehacer (Undo / Redo) mediante instantáneas JSON.
+     3. Línea de tiempo multipista con jerarquía de capas, bloqueo, silencio y estiramiento.
+     4. Importación y renderizado de Video, Imagen, Audio (con oscilograma) y Texto.
+     5. Compositor gráfico en Canvas 2D: Chroma Key (verde, azul, cuadros), filtros
+        preestablecidos, ajustes avanzados (luz, color, HSL, viñeta, grano, enfoque),
+        transformaciones espaciales (mover, escalar, rotar con punto de eje/pivote)
+        y animaciones estilo PowerPoint (Entrada, Salida, Énfasis).
+     6. Herramientas de edición por selección de área: Modo Recortes, Modo Color
+        y Zona de Audio.
+     7. Recorte manual de imágenes con herramienta Pluma / Lazo poligonal (normal e invertido).
+     8. Procesamiento de audio DSP en tiempo real con Web Audio API (EQ de 3 bandas,
+        filtros HPF/LPF, compresor, limitador, puerta de ruido, reverb, delay, pan,
+        fundidos fade-in/out/crossfade, velocidad y tono).
+     9. Exportación en tiempo real con MediaRecorder + remuxer MP4 propio (fragmentedMp4ToMp4)
+        para garantizar duración exacta y compatibilidad en reproductores.
+    10. Persistencia automática total en IndexedDB (sobrevive a recargas y cierres).
+   ========================================================================== */
+
 // --- Constantes del editor ---
 const PX_PER_SEC = 40;          // Escala de la línea de tiempo (px por segundo)
 const THUMB_H = 58;             // Alto del filmstrip (alto de la fila - bordes)
@@ -130,6 +153,10 @@ let undoStack = [];
 let redoStack = [];
 
 // Serializa las filas y los clips que contienen
+/**
+ * Convierte todas las filas y clips actuales de la línea de tiempo en un arreglo
+ * de objetos planos listos para guardarse en el historial Undo/Redo o en IndexedDB.
+ */
 function serializeRows() {
     return Array.from(rowsContainer.children).map(row => ({
         muted: row.classList.contains('muted'),
@@ -158,6 +185,9 @@ function serializeRows() {
     }));
 }
 
+/**
+ * Guarda una instantánea del estado actual de la línea de tiempo en la pila de Deshacer (undoStack).
+ */
 function recordState() {
     if (!currentProjectId || !projects[currentProjectId]) return;
 
@@ -170,6 +200,9 @@ function recordState() {
     redoStack = []; // Limpiar rehacer cuando se realiza una nueva acción
 }
 
+/**
+ * Revierte la última acción realizada en el editor restaurando el estado previo de undoStack.
+ */
 function undo() {
     if (trimBusy || undoStack.length <= 1) return; // Mantener al menos el estado inicial
 
@@ -179,6 +212,9 @@ function undo() {
     applyState(JSON.parse(undoStack[undoStack.length - 1]));
 }
 
+/**
+ * Vuelve a aplicar una acción previamente deshecha desde redoStack.
+ */
 function redo() {
     if (trimBusy || redoStack.length === 0) return;
 
@@ -233,6 +269,9 @@ redoBtn.addEventListener('click', redo);
 // =====================================================================
 //  Navegación
 // =====================================================================
+/**
+ * Cierra el editor activo, detiene la reproducción, guarda cambios y regresa a la galería de proyectos.
+ */
 function showMainView(pushToHistory = true) {
     closeTextPopup();
     exitTrimMode();
@@ -249,6 +288,9 @@ function showMainView(pushToHistory = true) {
     }
 }
 
+/**
+ * Abre un proyecto específico en el editor, carga sus pistas/clips y reinicia el reloj y el historial.
+ */
 function openProjectView(projectId, pushToHistory = true) {
     currentProjectId = projectId;
     const project = projects[projectId];
@@ -389,6 +431,10 @@ addRowBtn.addEventListener('click', () => {
     commit();
 });
 
+/**
+ * Crea una nueva pista (fila) en la línea de tiempo con agarradera de reordenamiento,
+ * manillas laterales de estiramiento y menú contextual propio.
+ */
 function createRowElement(atTop = false) {
     const row = document.createElement('div');
     row.className = 'row-item';
@@ -498,6 +544,9 @@ function timelineSeconds() {
     return timelineWidthPx / PX_PER_SEC;
 }
 
+/**
+ * Ajusta el ancho total en píxeles de la línea de tiempo y redibuja la regla superior de segundos.
+ */
 function setTimelineWidth(px) {
     px = Math.max(100, Math.round(px));
     timelineWidthPx = px;
@@ -889,6 +938,10 @@ function textFontCss(t, px) {
 }
 
 // Lienzo con el texto ya dibujado (a TEXT_SS veces su tamaño). Solo se vuelve a dibujar si algo cambió.
+/**
+ * Renderiza un clip de texto en un Canvas fuera de pantalla a doble resolución (supersampling)
+ * para que se vea nítido al escalarlo en la vista previa o al exportar.
+ */
 function textSurface(clip) {
     const t = clip.txt;
     if (!t) return null;
@@ -1297,6 +1350,10 @@ function syncAdjustmentControls(clip) {
     });
 }
 
+/**
+ * Abre el panel flotante 'Color' junto al elemento indicado para modificar filtros
+ * preestablecidos y ajustes finos de imagen de uno o varios clips seleccionados.
+ */
 function openFilterPopup(clip, anchorEl, batchClips = null) {
     if (!clip || clip.locked) return;
     filterTargetClip = clip;
@@ -1557,6 +1614,10 @@ function findEmptyRow() {
     );
 }
 
+/**
+ * Importa un archivo de video local, crea su fuente compartida, lo coloca en una pista
+ * y lanza en segundo plano la extracción progresiva de fotogramas (filmstrip).
+ */
 async function importVideoFile(file) {
     const projectId = currentProjectId;
     if (!projectId) return false;
@@ -1586,6 +1647,9 @@ async function importVideoFile(file) {
 }
 
 // Importa una imagen como un clip estático de la línea de tiempo (duración inicial: 3 s).
+/**
+ * Importa una imagen local como clip estático de 3 segundos iniciales en la pista superior disponible.
+ */
 async function importImageFile(file) {
     const projectId = currentProjectId;
     if (!projectId || !file.type.startsWith('image/')) return false;
@@ -1630,6 +1694,9 @@ function isAudioFile(file) {
     return file.type.startsWith('audio/') || (!file.type && AUDIO_EXT.test(file.name));
 }
 
+/**
+ * Importa un archivo de audio, lo coloca en una pista inferior y calcula su oscilograma en segundo plano.
+ */
 async function importAudioFile(file) {
     const projectId = currentProjectId;
     if (!projectId) return false;
@@ -1745,6 +1812,10 @@ function queueAudioPeaks(source) {
         .finally(() => { source.peaksBusy = false; });
 }
 
+/**
+ * Decodifica el archivo de audio a baja frecuencia (8 kHz) para extraer los picos mínimos y máximos
+ * por columna y dibujar la forma de onda sin consumir excesiva memoria RAM.
+ */
 async function buildAudioPeaks(source) {
     if (source.disposed) return;
     await waitUntilIdle(source);                 // No compite con la reproducción ni con la exportación
@@ -2293,6 +2364,10 @@ async function waitUntilIdle(source) {
     while ((clock.playing || exporting) && !source.disposed) await sleep(300);
 }
 
+/**
+ * Extrae fotogramas del video en varias pasadas (de grueso a fino) usando un único decodificador
+ * auxiliar que se pausa automáticamente si el usuario reproduce o exporta.
+ */
 async function buildThumbnails(source) {
     if (source.disposed) return;
 
@@ -2492,6 +2567,10 @@ function rowFromPoint(y) {
     return y < rows[0].getBoundingClientRect().top ? rows[0] : rows[rows.length - 1];
 }
 
+/**
+ * Configura el arrastre con puntero de un clip: moverlo verticalmente cambia su pista/capa
+ * y moverlo horizontalmente ajusta su segundo de inicio evitando solapamientos.
+ */
 function setupClipDrag(clip) {
     const el = clip.el;
 
@@ -2651,6 +2730,10 @@ function render() {
 }
 
 // Composición de todas las capas en el contexto que se le pase
+/**
+ * Dibuja el fotograma completo del segundo actual (clock.t) apilando todas las capas visibles
+ * de abajo hacia arriba (la fila superior del timeline queda por encima de las demás).
+ */
 function renderComposite(ctx) {
     const canvasW = previewCanvas.width;
     const canvasH = previewCanvas.height;
@@ -2727,6 +2810,10 @@ function hasTransform(t) {
 let filterLayerCanvas = document.createElement('canvas');
 let filterLayerCtx = filterLayerCanvas.getContext('2d', { willReadFrequently: true });
 
+/**
+ * Renderiza una capa individual aplicando Chroma Key, transformaciones espaciales (posición,
+ * rotación, escala), filtros preestablecidos y ajustes de color/luz.
+ */
 function drawClipLayer(ctx, clip, source, fit, canvasW, canvasH) {
     if (!fit || !source) return;
     const { x, y, w, h } = fit;
@@ -2774,6 +2861,10 @@ function requestRender() {
 }
 
 // Quita el fondo verde o azul volviendo transparentes los píxeles dominados por ese canal
+/**
+ * Elimina el fondo de color sólido (verde o azul) o cuadrícula gris/blanca volviendo
+ * transparentes los píxeles coincidentes en el lienzo temporal.
+ */
 function applyChromaKey(ctx, x, y, w, h, mode) {
     const img = ctx.getImageData(x, y, w, h);
     const d = img.data;
@@ -2819,6 +2910,10 @@ function applyChromaKey(ctx, x, y, w, h, mode) {
 }
 
 // Pone cada video en el punto correcto: reproduce los activos, pausa el resto
+/**
+ * Sincroniza el estado de reproducción, tiempo interno, velocidad y volumen de todos los
+ * elementos <video> y <audio> activos con el reloj maestro de la línea de tiempo.
+ */
 function syncClips() {
     if (!currentProjectId) return;
 
@@ -3171,6 +3266,10 @@ function askExportQuality() {
 // --- Audio -----------------------------------------------------------
 // Cada <video> pasa por un nodo de ganancia y de ahí a los parlantes.
 // Al exportar, esos mismos nodos se conectan además al destino que se graba.
+/**
+ * Construye el grafo de Web Audio API conectando cada elemento multimedia a su nodo de ganancia
+ * y a la salida maestra para permitir mezcla en vivo y captura de audio al exportar.
+ */
 function ensureAudioGraph() {
     if (!currentProjectId) return;
 
@@ -3286,6 +3385,10 @@ async function saveBlob(blob, fileHandle, fileName) {
 //  reutilizan tal cual (Blob.slice), así que casi no gasta memoria. Si algo falla, el
 //  llamador guarda el archivo original sin tocarlo.
 // =====================================================================
+/**
+ * Remuxer MP4 sin recodificación: convierte el MP4 fragmentado generado por Chrome MediaRecorder
+ * en un MP4 estándar con cabecera 'moov' al inicio y duración exacta.
+ */
 async function fragmentedMp4ToMp4(blob) {
     const ascii = (s) => Uint8Array.from(s, c => c.charCodeAt(0));
     const fourcc = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
@@ -4267,6 +4370,10 @@ async function prepareVideoAt(v, t) {
     return seekVideo(v, t, 8000);
 }
 
+/**
+ * Ejecuta el recorte temporal del rango [t0, t1] sobre las filas seleccionadas: elimina los
+ * fragmentos internos, divide los clips atravesados y desplaza el resto hacia la izquierda.
+ */
 async function applyTrim(t0, t1, rows) {
     if (trimBusy || !currentProjectId) return;
 
@@ -4543,6 +4650,10 @@ function planRowFilterSplit(row, t0, t1) {
     return plan;
 }
 
+/**
+ * Aísla el tramo temporal [t0, t1] dividiendo los clips visuales en los bordes de la selección
+ * sin borrar contenido y abre el panel de Color sobre los segmentos resultantes.
+ */
 async function applyFilterRegion(t0, t1, rows) {
     if (trimBusy || !currentProjectId) return;
 
@@ -5061,6 +5172,10 @@ document.addEventListener('click', (e) => {
         searchResults.classList.add('hidden');
     }
 });
+/**
+ * Aplica los filtros preestablecidos (Barras negras, B&N, Sepia, Vintage, Orange & Teal,
+ * Moody Film, Retro VHS, Bright, Glitch) respetando el porcentaje de intensidad configurado.
+ */
 function applyVideoFilters(ctx, clip, fit, canvasW, canvasH) {
     const filter = clip.filterType || 'none';
     const intensity = (clip.intensity ?? 100) / 100;
@@ -5197,6 +5312,10 @@ function hslToRgb(h, s, l) {
 function selectedHslColor(h, selected) {
     return selected.some(name => HSL_RANGES[name]?.some(([a, b]) => h >= a && h <= b));
 }
+/**
+ * Procesa píxel a píxel los ajustes avanzados de imagen (exposición, brillo, contraste,
+ * altas luces, sombras, saturación, vibrance, temperatura, tinte, HSL selectivo, viñeta, grano, desenfoque y enfoque).
+ */
 function applyClipAdjustments(ctx, clip, fit, canvasW, canvasH) {
     const a = getClipAdjustments(clip);
     if (!Object.keys(ADJUSTMENT_DEFAULTS).some(k => k !== 'hslColors' && Number(a[k] || 0) !== 0) && !a.hslColors.length) return;
@@ -5378,6 +5497,10 @@ cropInvertBtn.addEventListener('click', () => {
     drawManualCropEditor();
 });
 
+/**
+ * Abre el modal de recorte manual tipo Pluma / Lazo poligonal para recortar imágenes
+ * mediante puntos, con soporte para zoom, desplazamiento e inversión del área recortada.
+ */
 function openManualCropModal(clip) {
     if (!clip || clip.type !== 'image' || clip.locked || !clip.image || !clip.image.complete) return;
     pause();
@@ -5807,6 +5930,10 @@ function cloneCanvasElement(srcCanvas) {
     return copy;
 }
 
+/**
+ * Duplica un clip de imagen (conservando su recorte manual y efectos) o de texto
+ * en una nueva pista superior en el mismo instante de tiempo.
+ */
 function duplicateClipToNewRow(clip) {
     if (!clip || !currentProjectId || trimBusy || exporting) return;
     if (clip.type !== 'image' && clip.type !== 'text') return;
@@ -6690,6 +6817,10 @@ function applyFadeCurve(t, mode) {
     return t * t * (3 - 2 * t); // 'smooth' (curva S)
 }
 
+/**
+ * Calcula la ganancia instantánea de un clip de audio combinando ganancia base, boost en dB,
+ * curvas de Fade In / Fade Out, fundido cruzado (Crossfade) y puerta de ruido.
+ */
 function computeClipEnvelopeGain(clip, localT) {
     const fx = getClipAudioFx(clip);
     const baseGain = (fx.gain / 100) * Math.pow(10, (fx.boostDb || 0) / 20);
@@ -7420,6 +7551,10 @@ function easeOutBounce(t) {
     return n1 * (t -= 2.625 / d1) * t + 0.984375;
 }
 
+/**
+ * Calcula el desplazamiento, escala, rotación y opacidad instantáneos de una imagen o texto
+ * según su animación asignada (Entrada, Salida o Énfasis) y su velocidad en segundos.
+ */
 function computeClipAnimState(clip, localT, canvasW, canvasH) {
     const state = { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0, alpha: 1 };
     if (!clip || (clip.type !== 'image' && clip.type !== 'text')) return state;
@@ -7667,6 +7802,10 @@ duplicateClipToNewRow = function(clip) {
 // =====================================================================
 
 // Detecta el centroide de los píxeles visibles (alfa > 20) de una imagen recortada o texto
+/**
+ * Analiza los píxeles no transparentes de una imagen recortada o texto para calcular
+ * automáticamente su centro geométrico y ubicar allí el punto de eje (pivote).
+ */
 function detectVisibleCenterNorm(clip) {
     if (!clip) return { px: 0.5, py: 0.5 };
     let src = null;
@@ -8006,6 +8145,10 @@ openAnimPopup = function(clip, anchorEl) {
 //  recortes manuales (croppedCanvas), filas, tiempos, filtros, ajustes,
 //  audio DSP, animaciones, pivotes, formato de aspecto y velocidad.
 // =====================================================================
+/**
+ * Módulo autoejecutable de persistencia total en IndexedDB: intercepta cambios en proyectos,
+ * archivos multimedia, recortes manuales y configuraciones para restaurar todo al recargar.
+ */
 (function initTotalPersistence() {
     const DB_NAME = 'VideoEditorTotalDB_v1';
     const DB_VERSION = 1;
